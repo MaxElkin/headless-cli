@@ -153,6 +153,10 @@ import {
 } from "./roles.js";
 import { expandTeamSpecs } from "./teams.js";
 import type { AgentName, AllowMode, BillingMode, BuildOptions, BuiltCommand, Env, ReasoningEffort } from "./types.js";
+import { buildWithForkAllow, isForkAllowMode } from "./fork/allow.js";
+import { applyForkClean, validateForkClean } from "./fork/clean.js";
+import { buildForkAttachCommand, forkAttachTmuxSession, validateForkAttach } from "./fork/attach.js";
+import { beginForkTmuxClaim, claimForkTmuxSession, planForkTmuxSession, recordForkTmuxSession } from "./fork/sessions.js";
 
 interface ParsedArgs {
   billing?: BillingMode;
@@ -160,6 +164,9 @@ interface ParsedArgs {
   attach: boolean;
   attachSession?: string;
   attachAll: boolean;
+  forkAttach?: boolean;
+  forkCleanBefore?: boolean;
+  forkCleanAfter?: boolean;
   send: boolean;
   sendSession?: string;
   rename: boolean;
@@ -298,7 +305,7 @@ function usage(): string {
     "  --no-fast             Disable ambient Fast mode for Codex or Claude.",
     "  --reasoning-effort, --effort <level> Reasoning effort: low, medium, high, or xhigh.",
     "  --billing <auto|subscription|api> Subscription first (default); Claude API uses Bedrock.",
-    "  --allow <mode>        Permission mode: read-only or yolo.",
+    "  --allow <mode>        Permission mode: read-only, yolo, project, ask, or auto.",
     "  --acp-agent <id>      With acp, resolve an ACP server from the registry by id or name.",
     "  --acp-command <cmd>   With acp, run a custom ACP server command, e.g. 'atlas alta agent run'.",
     "  --acp-registry <url>  With --acp-agent, use a custom ACP registry URL.",
@@ -332,10 +339,13 @@ function usage(): string {
     "  --debug              Stream raw trace and print extracted final message.",
     "  --usage              Append normalized token and API-equivalent cost JSON.",
     "  --tmux               Launch an interactive agent in a tmux session.",
+    "  --attach             Like --tmux, then attach this terminal to the new session.",
     "  --wait               With --tmux, wait for native transcript completion and print the final message.",
     "  --delete             With --tmux --wait, kill the tmux session after completion.",
     "  --name <name>        Use a managed tmux session name with --tmux.",
     "  --session <name>     Start or resume a named Headless session.",
+    "  --clean-before       With --session, start a new conversation (refused while its tmux session runs).",
+    "  --clean-after        With --session, start a new conversation on the first launch after this one stops.",
     "  attach [session]     Attach to one or all active headless tmux sessions.",
     "  --all                With attach, tile all active headless tmux sessions.",
     "  send <session-name>  Send a message to an existing headless tmux session.",
@@ -600,6 +610,15 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--tmux":
         parsed.tmux = true;
         break;
+      case "--attach":
+        parsed.tmux = parsed.forkAttach = true;
+        break;
+      case "--clean-before":
+        parsed.forkCleanBefore = true;
+        break;
+      case "--clean-after":
+        parsed.forkCleanAfter = true;
+        break;
       case "--all":
         parsed.attachAll = true;
         break;
@@ -720,7 +739,7 @@ function takeValue(args: string[], flag: string | undefined): string {
 }
 
 function parseAllowMode(value: string): AllowMode {
-  if (value === "read-only" || value === "yolo") {
+  if (value === "read-only" || value === "yolo" || isForkAllowMode(value)) {
     return value;
   }
   throw new CliError(`unsupported allow mode: ${value}`);
@@ -4020,6 +4039,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     if (parsed.wait && parsed.printCommand) {
       throw new CliError("--wait cannot be used with --print-command");
     }
+    if (parsed.forkAttach) validateForkAttach(parsed, deps.stdinIsTTY ?? Boolean(process.stdin.isTTY));
     if (parsed.usage && parsed.tmux) {
       throw new CliError("--usage cannot be used with --tmux");
     }
@@ -4039,6 +4059,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
       throw new CliError("--session cannot be used with --modal");
     }
     validateSessionAlias(parsed.sessionAlias);
+    validateForkClean(parsed);
     const coordination = effectiveCoordination(parsed, config.general.coordination);
     if (
       parsed.docker &&
@@ -4102,6 +4123,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     if (parsed.docker) {
       validateDockerWorkDir(cwd ?? process.cwd());
     }
+    applyForkClean(parsed.agent, parsed, env);
     const existingTmuxSession = parsed.tmux && parsed.sessionAlias
       ? await headlessTmuxSessionExists(buildHeadlessTmuxSessionName(parsed.agent, parsed.sessionAlias), env)
       : false;
@@ -4202,6 +4224,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           for (const command of tmuxCommands.commands) {
             stdout(`${quoteCommand(command)}\n`);
           }
+          if (parsed.forkAttach) stdout(`${quoteCommand(buildForkAttachCommand(sessionName, env))}\n`);
           return 0;
         }
         const waitSnapshot = existingStrategy
@@ -4260,6 +4283,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           stdout(`${value.finalMessage}\n`);
           return deleteCode;
         }
+        if (value.code === 0 && parsed.forkAttach) return await forkAttachTmuxSession(sessionName, env, stderr);
         if (value.code === 0) stdout(`sent: ${tmuxCommands.sessionName}\n`);
         return value.code;
       }
@@ -4271,6 +4295,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         ? await resolveTmuxWaitPlan(parsed.agent, tmuxSessionName, composedPrompt, cwd, env)
         : undefined;
       const tmuxPrompt = waitPlan?.prompt ?? composedPrompt;
+      const forkSession = planForkTmuxSession(parsed.agent, parsed.sessionAlias, tmuxWaitWorkDir, env, Boolean(parsed.wait));
       const tmuxCommandOptions = {
         prompt: tmuxPrompt,
         model: configuredDefaults.model,
@@ -4279,10 +4304,11 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         fast,
         reasoningEffort: configuredDefaults.reasoningEffort,
         ...(waitPlan?.identity ?? {}),
+        ...(forkSession?.identity ?? {}),
       };
       const tmuxCommand =
         parsed.agent === "opencode" && parsed.wait
-          ? buildInteractiveOpencodeRun(tmuxCommandOptions)
+          ? buildWithForkAllow("opencode", tmuxCommandOptions, buildInteractiveOpencodeRun)
           : buildInteractiveAgentCommand(parsed.agent, tmuxCommandOptions, env);
       const reasoningWarning = unsupportedReasoningEffortWarning(
         parsed.agent,
@@ -4307,6 +4333,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         for (const postLaunch of tmuxCommands.postLaunch) {
           stdout(`${quoteCommand(postLaunch.command)}\n`);
         }
+        if (parsed.forkAttach) stdout(`${quoteCommand(buildForkAttachCommand(tmuxCommands.sessionName, env))}\n`);
         return 0;
       }
 
@@ -4334,7 +4361,9 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         async () => {
           let code: number;
           try {
+            beginForkTmuxClaim(selectedAgent, forkSession, env);
             code = await executeTmuxCommands(tmuxCommands, cwd, env, stderr);
+            if (code === 0) await claimForkTmuxSession(selectedAgent, forkSession, tmuxCommands.sessionName, env, stderr);
             if (code === 0 && waitSnapshot?.strategy.kind === "claim") {
               const claimed = await claimNewTranscriptPath(
                 selectedAgent,
@@ -4348,8 +4377,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
             }
           } finally {
             claimLock?.release();
+            forkSession?.release();
           }
           const tmuxWaitStrategy = waitSnapshot ? storedTmuxWaitStrategy(waitSnapshot.strategy) : undefined;
+          if (code === 0) recordForkTmuxSession(env, selectedAgent, parsed.sessionAlias, forkSession, tmuxWaitStrategy, cwd, profile);
           if (code === 0 && parsed.sessionAlias && (profile || tmuxWaitStrategy) && sessionStorePath(env)) {
             writeStoredTmuxSession(env, {
               agent: selectedAgent,
@@ -4406,6 +4437,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         stdout(`${value.finalMessage}\n`);
         return deleteCode;
       }
+      if (value.code === 0 && parsed.forkAttach) return await forkAttachTmuxSession(tmuxCommands.sessionName, env, stderr);
       if (value.code === 0) {
         stdout(`tmux session: ${tmuxCommands.sessionName}\n`);
         stdout(`attach: ${quoteCommand(buildTmuxAttachCommand(tmuxCommands.sessionName).command)}\n`);

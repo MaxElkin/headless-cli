@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { isCoordinationMode, isRole, type CoordinationMode, type Role } from "./roles.js";
+import { isCoordinationMode, isRole, roleDefaultAllow, type CoordinationMode, type Role } from "./roles.js";
 import type { AgentName, AllowMode, BillingMode, Env, ReasoningEffort } from "./types.js";
+import { isForkAllowMode } from "./fork/allow.js";
 
 export interface AgentDefaults {
   billing?: BillingMode;
@@ -28,6 +29,7 @@ export interface GeneralDefaults {
   coordination?: CoordinationMode;
   runStatusIntervalMs?: number;
   listWaitingAfterMs?: number;
+  allow?: AllowMode;
 }
 
 export interface HeadlessConfig {
@@ -89,7 +91,7 @@ export function resolveInvocationDefaults(
   return {
     model: options.model ?? envModelDefault(agent, env) ?? configuredRole.model ?? configuredAgent.model,
     reasoningEffort: options.reasoningEffort ?? configuredRole.reasoningEffort ?? configuredAgent.reasoningEffort,
-    allow: options.allow ?? configuredRole.allow,
+    allow: options.allow ?? configuredRole.allow ?? roleDefaultAllow(role) ?? config.general.allow,
     baseInstructionPrompt: configuredRole.baseInstructionPrompt,
   };
 }
@@ -201,6 +203,8 @@ function parseGeneralConfigValue(defaults: GeneralDefaults, key: string, rawValu
     defaults.runStatusIntervalMs = parseConfigPositiveInteger(rawValue, lineNumber, key);
   } else if (key === "list_waiting_after_ms") {
     defaults.listWaitingAfterMs = parseConfigPositiveInteger(rawValue, lineNumber, key);
+  } else if (key === "allow") {
+    defaults.allow = parseConfigAllow(parseSimpleTomlString(rawValue, lineNumber), lineNumber);
   } else {
     throw new Error(`unsupported headless general config key at line ${lineNumber}: ${key}`);
   }
@@ -242,7 +246,7 @@ function parseConfigBilling(value: string, lineNumber: number): BillingMode {
 }
 
 function parseConfigAllow(value: string, lineNumber: number): AllowMode {
-  if (value === "read-only" || value === "yolo") {
+  if (value === "read-only" || value === "yolo" || isForkAllowMode(value)) {
     return value;
   }
   throw new Error(`unsupported headless config allow at line ${lineNumber}: ${value}`);

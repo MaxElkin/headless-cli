@@ -2,7 +2,9 @@ export type AgentName = "acp" | "antigravity" | "claude" | "codex" | "cursor" | 
 
 export type PromptFileMode = "argument" | "stdin";
 
-export type AllowMode = "read-only" | "yolo";
+import type { ForkAllowMode } from "./fork/allow.js";
+
+export type AllowMode = "read-only" | "yolo" | ForkAllowMode;
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 

@@ -14,6 +14,8 @@ import { delimiter, join } from "node:path";
 import { commandFromCustom, resolveAcpCommand } from "./acp.js";
 import { BUILTIN_AGENT_DEFAULTS } from "./config.js";
 import { validateCodexProfileName } from "./codex-profile.js";
+import { buildWithForkAllow } from "./fork/allow.js";
+import { withForkInteractiveResume } from "./fork/sessions.js";
 
 const agentOrder: AgentName[] = ["acp", "antigravity", "claude", "codex", "cursor", "gemini", "opencode", "pi"];
 const defaultClaudeModel = BUILTIN_AGENT_DEFAULTS.claude.model;
@@ -660,7 +662,7 @@ export function getAgentConfig(name: AgentName): AgentConfig {
 
 export function buildAgentCommand(name: AgentName, options: BuildOptions, env: Env = process.env): BuiltCommand {
   validateProfileAgent(name, options.profile);
-  return getAgentHarness(name).buildCommand(options, env);
+  return buildWithForkAllow(name, options, (opts) => getAgentHarness(name).buildCommand(opts, env));
 }
 
 export function buildInteractiveAgentCommand(
@@ -669,7 +671,7 @@ export function buildInteractiveAgentCommand(
   env: Env = process.env,
 ): BuiltCommand {
   validateProfileAgent(name, options.profile);
-  return getAgentHarness(name).buildInteractiveCommand(options, env);
+  return withForkInteractiveResume(name, options, buildWithForkAllow(name, options, (opts) => getAgentHarness(name).buildInteractiveCommand(opts, env)));
 }
 
 function validateProfileAgent(name: AgentName, profile: string | undefined): void {
