@@ -151,8 +151,24 @@ function withGeminiAllow(args: string[], allow: AllowMode | undefined): string[]
   return [...args, "--approval-mode", "yolo"];
 }
 
-function opencodeEnv(allow: AllowMode | undefined): Env | undefined {
-  return allow === "read-only" ? { OPENCODE_CONFIG_CONTENT: opencodeReadOnlyConfig } : undefined;
+function opencodeEnv(allow: AllowMode | undefined, extra?: Record<string, unknown>): Env | undefined {
+  const config = {
+    ...(allow === "read-only" ? JSON.parse(opencodeReadOnlyConfig) as Record<string, unknown> : {}),
+    ...(extra ?? {}),
+  };
+  return Object.keys(config).length > 0 ? { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) } : undefined;
+}
+
+/**
+ * The TUI has no `--variant`, so an effort reaches it as config: the default
+ * variant of the agents a session starts in. opencode applies an agent's
+ * variant only while it runs the agent's own model, so the model is set there
+ * as well as on the command line.
+ */
+function opencodeInteractiveConfig(model: string, effort: string | undefined): Record<string, unknown> | undefined {
+  if (!effort) return undefined;
+  const agent = { model, variant: effort };
+  return { agent: { build: agent, plan: agent } };
 }
 
 function commandWithOptionalEnv(command: string, args: string[], env: Env | undefined): BuiltCommand {
@@ -445,11 +461,14 @@ function buildOpencode(options: BuildOptions): BuiltCommand {
 }
 
 function buildInteractiveOpencode(options: BuildOptions): BuiltCommand {
-  const args = withModel([], options.model ?? DEFAULT_OPENCODE_MODEL);
+  const model = options.model ?? DEFAULT_OPENCODE_MODEL;
+  const args = withModel([], model);
   if (options.allow === "yolo" || options.allow === undefined) {
     args.push("--dangerously-skip-permissions");
   }
-  return commandWithOptionalEnv("opencode", args, opencodeEnv(options.allow));
+  return commandWithOptionalEnv(
+    "opencode", args, opencodeEnv(options.allow, opencodeInteractiveConfig(model, options.reasoningEffort)),
+  );
 }
 
 export function buildInteractiveOpencodeRun(options: BuildOptions): BuiltCommand {

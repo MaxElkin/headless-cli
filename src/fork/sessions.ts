@@ -5,9 +5,11 @@
 // of every tmux launch in the session store (the same `nativeId` one-shot `--session` uses) and,
 // when the tmux session is gone, relaunches it resuming that conversation.
 //
-// The id is known up front for a resume and for Claude (`--session-id <uuid>`). Codex and
-// Antigravity cannot be given one, so the fork claims the transcript that appears after launch,
-// under the same launch lock upstream's `--tmux --wait` claim tier uses.
+// The id is known up front for a resume and for Claude (`--session-id <uuid>`). Codex,
+// Antigravity and OpenCode cannot be given one, so the fork claims the transcript that appears
+// after launch — for OpenCode, the new session row in its database for the work dir — under the
+// same launch lock upstream's `--tmux --wait` claim tier uses. OpenCode writes the row with the
+// first message, so a session launched without a prompt is claimed only if one is typed in time.
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
@@ -17,7 +19,7 @@ import { resolveLatestNativeTranscripts } from "../native-transcripts.js";
 import { readStoredSession, writeStoredSession, type StoredTmuxWaitStrategy } from "../sessions.js";
 import type { AgentName, BuildOptions, BuiltCommand, Env } from "../types.js";
 
-const resumableAgents: readonly AgentName[] = ["antigravity", "claude", "codex"];
+const resumableAgents: readonly AgentName[] = ["antigravity", "claude", "codex", "opencode"];
 
 export interface ForkTmuxSession {
   identity: Pick<BuildOptions, "sessionMode" | "sessionId">;
@@ -114,7 +116,7 @@ function tmuxSessionExists(sessionName: string, env: Env): boolean {
   return result.status === 0;
 }
 
-// Called right after a successful launch: waits for the new transcript of a Codex or Antigravity
+// Called right after a successful launch: waits for the new transcript of a Codex, Antigravity or OpenCode
 // session and takes its id. Gives up when the tmux session exits or after the timeout, leaving the
 // session without a recorded id rather than guessing.
 export async function claimForkTmuxSession(
@@ -169,8 +171,10 @@ export function recordForkTmuxSession(
   writeStoredSession(env, { agent, alias, nativeId, profile, workDir });
 }
 
-// Upstream's interactive Claude command has no resume case.
+// Upstream's interactive Claude and OpenCode commands have no resume case.
 export function withForkInteractiveResume(name: AgentName, options: BuildOptions, command: BuiltCommand): BuiltCommand {
-  if (name !== "claude" || options.sessionMode !== "resume" || !options.sessionId) return command;
-  return { ...command, args: ["--resume", options.sessionId, ...command.args] };
+  if (options.sessionMode !== "resume" || !options.sessionId) return command;
+  if (name === "claude") return { ...command, args: ["--resume", options.sessionId, ...command.args] };
+  if (name === "opencode") return { ...command, args: [...command.args, "--session", options.sessionId] };
+  return command;
 }

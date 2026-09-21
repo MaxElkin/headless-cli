@@ -43,7 +43,7 @@ test("CLI send pastes a prompt into an existing headless tmux session", async ()
     assert.equal(code, 0);
     assert.deepEqual(readTmuxCalls(captureFile), [
       ["set-buffer", "-b", "headless-codex-123-send", "hello world"],
-      ["paste-buffer", "-d", "-b", "headless-codex-123-send", "-t", "headless-codex-123"],
+      ["paste-buffer", "-p", "-d", "-b", "headless-codex-123-send", "-t", "headless-codex-123"],
       ["send-keys", "-t", "headless-codex-123", "Enter"],
     ]);
     assert.equal(stdout.join(""), "sent: headless-codex-123\n");
@@ -110,7 +110,7 @@ test("CLI send --print-command prints tmux commands without executing them", asy
     stdout.join(""),
     [
       "tmux set-buffer -b headless-opencode-321-send 'hello world'",
-      "tmux paste-buffer -d -b headless-opencode-321-send -t headless-opencode-321",
+      "tmux paste-buffer -p -d -b headless-opencode-321-send -t headless-opencode-321",
       "tmux send-keys -t headless-opencode-321 Enter",
       "",
     ].join("\n"),

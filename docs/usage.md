@@ -27,7 +27,7 @@ printf "Review this diff" | headless pi --model claude-opus
 
 When no agent is specified, Headless selects the first installed agent in this order: `codex`, `claude`, `pi`, `opencode`, `gemini`, `antigravity`, `cursor`. ACP-compatible agents are explicit-only: use `headless acp --acp-agent ...` or `headless acp --acp-command ...`.
 
-When both `--model` and `--profile` are omitted, Headless defaults Codex to `gpt-5.5`. With `--profile`, Codex uses the profile's model unless `--model`, `CODEX_MODEL`, or Headless configuration supplies an explicit override. Headless defaults Claude to `claude-opus-4-6`, Cursor to the `gpt-5.5` family with medium effort, Gemini to `gemini-3.1-pro-preview`, OpenCode to `openai/gpt-5.4`, and Pi to `openai-codex/gpt-5.5`. Antigravity has no built-in Headless model default; pass one of the names reported by `agy models` with `--model` when you want a per-run override.
+When both `--model` and `--profile` are omitted, Headless defaults Codex to `gpt-5.5`. With `--profile`, Codex uses the profile's model unless `--model`, `CODEX_MODEL`, or Headless configuration supplies an explicit override. Headless defaults Claude to `claude-opus-4-6`, Cursor to the `gpt-5.5` family with medium effort, Gemini to `gemini-3.1-pro-preview`, OpenCode to `openai/gpt-5.4` (an OpenCode model is `provider/model`, as `opencode models` lists them; any other form is refused, since opencode itself would quietly start on its default instead), and Pi to `openai-codex/gpt-5.5`. Antigravity has no built-in Headless model default; pass one of the names reported by `agy models` with `--model` when you want a per-run override.
 
 ## ACP Agents
 
@@ -59,7 +59,7 @@ Environment equivalents are also supported: `HEADLESS_ACP_AGENT`, `HEADLESS_ACP_
 
 By default, Headless uses each agent's native auto-approve/bypass mode. Pass `--allow read-only` to use each agent's read-only or planning mode where available. Pass `--allow yolo` to request full tool access explicitly.
 
-Pass `--reasoning-effort low|medium|high|xhigh` or `--effort low|medium|high|xhigh` to request a normalized reasoning effort for agents with native support. Claude receives `--effort`, Codex receives `model_reasoning_effort`, Cursor combines the model family and effort into Cursor's model variant string, OpenCode receives `--variant` in one-shot mode, and Pi receives `--thinking`. Docker and Modal inherit the same one-shot command. In tmux mode, Claude, Codex, Cursor, and Pi receive their interactive effort flags. Antigravity, Gemini, and OpenCode tmux currently accept the option, leave the command unchanged, and print a warning.
+Pass `--reasoning-effort low|medium|high|xhigh` or `--effort low|medium|high|xhigh` to request a normalized reasoning effort for agents with native support. Claude receives `--effort`, Codex receives `model_reasoning_effort`, Cursor combines the model family and effort into Cursor's model variant string, OpenCode receives `--variant` in one-shot mode, and Pi receives `--thinking`. Docker and Modal inherit the same one-shot command. In tmux mode, Claude, Codex, Cursor, and Pi receive their interactive effort flags. OpenCode's TUI has no `--variant`, so it receives the effort through `OPENCODE_CONFIG_CONTENT`, as the default variant of its `build` and `plan` agents, with the model set on them too, since opencode applies an agent's variant only to the agent's own model. Antigravity and Gemini accept the option, leave the command unchanged, and print a warning.
 
 Fast mode is off by default and is controlled per invocation, not through `~/.headless/config.toml`. Pass `--fast` to opt into the provider's native Fast mode for Codex or Claude; other agents reject the flag. Headless explicitly sends Codex `service_tier="default"` or `service_tier="fast"`, and Claude `fastMode: false` or `true`, so an inherited provider config cannot silently enable Fast mode. The same option works for Docker, Modal, tmux, and `cron add` runs.
 
@@ -91,6 +91,22 @@ headless --prompt "identity" --print-command --json
 ```bash
 headless codex --prompt "Fix the failing tests" --debug
 ```
+
+`--progress` shows the run on stderr as it goes — what the agent says, one line per tool call, and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams; OpenCode reports a tool call once it has finished. Antigravity prints no events, so for a local run its transcript under `brain/<conversation>/` is followed instead: the first one started after the run and asked its prompt. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
+
+```bash
+headless codex --prompt "Fix the failing tests" --progress
+```
+
+```text
+● Bash(npm test)
+  ⎿ failed: exit 1: 2 failing
+● Edit(src/parser.ts)
+● Bash(npm test)
+● Fixed the off-by-one in the tokenizer; all tests pass.
+```
+
+With `--sdk-format ndjson`, each `trace` envelope also carries `data.events`: the same events as `--progress` shows, in one shape for every agent whose trace is known (`message`, `thinking`, `tool`, `tool_result`, `error`), beside the native record in `data.value`. It is absent when a record holds nothing worth showing.
 
 `--usage` appends normalized token usage and cost JSON for one-shot runs, including Docker and Modal runs. In the default output mode it follows the extracted final message. With `--json`, it follows the streamed native trace and does not require Headless to extract a final assistant message.
 
@@ -303,6 +319,7 @@ Options:
 - `--timeout <s>`: stop one-shot local, Docker, Modal, or `--tmux --wait` execution after the given number of seconds. For Antigravity one-shot runs, Headless also forwards this budget to `agy --print-timeout`.
 - `--json`: stream the raw agent JSON trace instead of extracting the final message.
 - `--debug`: stream the raw agent JSON trace and append the extracted final message.
+- `--progress`: show what the agent says and which tools it calls on stderr as it works; stdout stays the final message.
 - `--usage`: append normalized token usage and cost JSON after the final message or streamed `--json` trace.
 - `--tmux`: launch an interactive agent in a detached tmux session with the prompt as its initial message.
 - `--wait`: with `--tmux`, wait for native transcript completion and print the final message.

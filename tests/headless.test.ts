@@ -6145,7 +6145,7 @@ test("CLI --tmux sends Enter after launching opencode prompt", async () => {
       ["new-session", "-d", "-s", sessionName, "-c", dir, "opencode --model oc-model --dangerously-skip-permissions"],
       ["send-keys", "-t", sessionName, "Space", "BSpace"],
       ["set-buffer", "-b", `${sessionName}-prompt`, "hello world"],
-      ["paste-buffer", "-d", "-b", `${sessionName}-prompt`, "-t", sessionName],
+      ["paste-buffer", "-p", "-d", "-b", `${sessionName}-prompt`, "-t", sessionName],
       ["send-keys", "-t", sessionName, "Enter"],
     ]);
     assert.match(sessionName, /^headless-opencode-\d+$/);
@@ -6195,7 +6195,7 @@ test("CLI --tmux sends Enter after launching Antigravity prompt", async () => {
       ["new-session", "-d", "-s", sessionName, "-c", dir, "agy --dangerously-skip-permissions"],
       ["send-keys", "-t", sessionName, "Space", "BSpace"],
       ["set-buffer", "-b", `${sessionName}-prompt`, "hello world"],
-      ["paste-buffer", "-d", "-b", `${sessionName}-prompt`, "-t", sessionName],
+      ["paste-buffer", "-p", "-d", "-b", `${sessionName}-prompt`, "-t", sessionName],
       ["send-keys", "-t", sessionName, "Enter"],
     ]);
     assert.match(sessionName, /^headless-antigravity-\d+$/);
@@ -6329,7 +6329,7 @@ test("CLI --tmux --print-command includes opencode Enter submit command", async 
   assert.match(stdout.join(""), /^tmux new-session -d -s headless-opencode-\d+ -c /);
   assert.match(stdout.join(""), /\ntmux send-keys -t headless-opencode-\d+ Space BSpace\n/);
   assert.match(stdout.join(""), /\ntmux set-buffer -b headless-opencode-\d+-prompt 'hello world'\n/);
-  assert.match(stdout.join(""), /\ntmux paste-buffer -d -b headless-opencode-\d+-prompt -t headless-opencode-\d+\n/);
+  assert.match(stdout.join(""), /\ntmux paste-buffer -p -d -b headless-opencode-\d+-prompt -t headless-opencode-\d+\n/);
   assert.match(stdout.join(""), /\ntmux send-keys -t headless-opencode-\d+ Enter\n$/);
 });
 
@@ -6349,7 +6349,7 @@ test("CLI --tmux --print-command includes Antigravity Enter submit command", asy
   assert.match(stdout.join(""), /^tmux new-session -d -s headless-antigravity-\d+ -c /);
   assert.match(stdout.join(""), /\ntmux send-keys -t headless-antigravity-\d+ Space BSpace\n/);
   assert.match(stdout.join(""), /\ntmux set-buffer -b headless-antigravity-\d+-prompt 'hello world'\n/);
-  assert.match(stdout.join(""), /\ntmux paste-buffer -d -b headless-antigravity-\d+-prompt -t headless-antigravity-\d+\n/);
+  assert.match(stdout.join(""), /\ntmux paste-buffer -p -d -b headless-antigravity-\d+-prompt -t headless-antigravity-\d+\n/);
   assert.match(stdout.join(""), /\ntmux send-keys -t headless-antigravity-\d+ Enter\n$/);
 });
 

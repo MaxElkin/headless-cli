@@ -154,6 +154,7 @@ import {
 import { expandTeamSpecs } from "./teams.js";
 import type { AgentName, AllowMode, BillingMode, BuildOptions, BuiltCommand, Env, ReasoningEffort } from "./types.js";
 import { buildWithForkAllow, isForkAllowMode } from "./fork/allow.js";
+import { ProgressRenderer, TranscriptFollower } from "./trace-events.js";
 import { applyForkClean, validateForkClean } from "./fork/clean.js";
 import { buildForkAttachCommand, forkAttachTmuxSession, validateForkAttach } from "./fork/attach.js";
 import { beginForkTmuxClaim, claimForkTmuxSession, planForkTmuxSession, recordForkTmuxSession } from "./fork/sessions.js";
@@ -202,6 +203,9 @@ interface ParsedArgs {
   acpRegistryFile?: string;
   acpRegistryUrl?: string;
   workDir?: string;
+  // Appended to the agent's own command line, as given. headless neither reads
+  // nor validates them: what one agent needs and headless has no notion of.
+  agentArgs: string[];
   tmuxName?: string;
   sessionAlias?: string;
   docker: boolean;
@@ -222,6 +226,7 @@ interface ParsedArgs {
   json: boolean;
   sdkFormat?: SdkFormat;
   debug: boolean;
+  progress: boolean;
   usage: boolean;
   wait: boolean;
   delete: boolean;
@@ -337,6 +342,7 @@ function usage(): string {
     "  --json               Stream raw agent JSON trace output.",
     "  --sdk-format <fmt>   Versioned SDK output: json or ndjson.",
     "  --debug              Stream raw trace and print extracted final message.",
+    "  --progress           Show what the agent says and which tools it calls on stderr as it works.",
     "  --usage              Append normalized token and API-equivalent cost JSON.",
     "  --tmux               Launch an interactive agent in a tmux session.",
     "  --attach             Like --tmux, then attach this terminal to the new session.",
@@ -388,6 +394,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     cronForce: false,
     dependsOn: [],
     teamSpecs: [],
+    agentArgs: [],
     docker: false,
     dockerArgs: [],
     dockerEnv: [],
@@ -397,6 +404,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     modalSecrets: [],
     json: false,
     debug: false,
+    progress: false,
     usage: false,
     wait: false,
     delete: false,
@@ -534,6 +542,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "-C":
         parsed.workDir = takeValue(args, arg);
         break;
+      case "--agent-arg":
+        parsed.agentArgs.push(takeValue(args, arg));
+        break;
       case "--docker":
         parsed.docker = true;
         break;
@@ -597,6 +608,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--debug":
         parsed.debug = true;
+        break;
+      case "--progress":
+        parsed.progress = true;
         break;
       case "--usage":
         parsed.usage = true;
@@ -909,14 +923,10 @@ function parsePositiveInteger(value: string, flag: string | undefined): number {
 function unsupportedReasoningEffortWarning(
   agent: AgentName,
   effort: ReasoningEffort | undefined,
-  mode: "headless" | "tmux",
-  opencodeTmuxEffortSupported = false,
+  _mode: "headless" | "tmux",
 ): string | undefined {
   if (!effort) {
     return undefined;
-  }
-  if (mode === "tmux" && agent === "opencode" && !opencodeTmuxEffortSupported) {
-    return "headless: reasoning effort is not supported by opencode in tmux mode and was ignored\n";
   }
   if (agent === "gemini" || agent === "antigravity") {
     return `headless: reasoning effort is not supported by ${agent} and was ignored\n`;
@@ -1087,7 +1097,7 @@ async function readStdin(): Promise<string> {
 async function resolvePrompt(
   parsed: ParsedArgs,
   deps: CliDeps,
-  options: { forceText?: boolean; requireAgent?: boolean } = {},
+  options: { forceText?: boolean; requireAgent?: boolean; allowEmpty?: boolean } = {},
 ): Promise<{ prompt: string; promptFile?: string }> {
   if (parsed.prompt && parsed.promptFile) {
     throw new CliError("use either --prompt or --prompt-file, not both");
@@ -1113,6 +1123,13 @@ async function resolvePrompt(
   const stdinIsTTY = deps.stdinIsTTY ?? Boolean(process.stdin.isTTY);
   if (!stdinIsTTY) {
     return { prompt: deps.stdin ?? (await readStdin()) };
+  }
+
+  // A session opened to be sat in rather than given a turn: with --attach or
+  // --tmux there is somewhere for the agent to wait, and nothing has to be
+  // said to it first.
+  if (options.allowEmpty) {
+    return { prompt: "" };
   }
 
   throw new CliError("missing prompt; use --prompt, --prompt-file, or piped stdin");
@@ -2194,6 +2211,9 @@ function tmuxPromptInput(
   env: Env,
   pastePrompt: boolean,
 ): TmuxPostLaunchCommand[] {
+  // No prompt is a session started to be sat in, not a turn: pasting an empty
+  // buffer and pressing Enter would open it with a blank message to the agent.
+  if (prompt === "") return [];
   if (!pastePrompt || (agent !== "opencode" && agent !== "antigravity")) return [];
 
   const envPrefix = agent === "opencode" ? "OPENCODE" : "ANTIGRAVITY";
@@ -2215,7 +2235,9 @@ function tmuxPromptInput(
       delayMs: pasteDelayMs,
     },
     {
-      command: { command: "tmux", args: ["paste-buffer", "-d", "-b", promptBuffer, "-t", sessionName] },
+      // Bracketed paste, so a multi-line prompt is text rather than a line per
+      // Return; see `buildTmuxSendCommands`.
+      command: { command: "tmux", args: ["paste-buffer", "-p", "-d", "-b", promptBuffer, "-t", sessionName] },
       delayMs: 0,
     },
     {
@@ -2452,13 +2474,32 @@ function renderHeadlessTmuxSessions(sessions: HeadlessTmuxSessionDetails[]): str
   );
 }
 
+// `-p` on the paste is what makes a multi-line prompt arrive as one message.
+// Without it tmux delivers every newline in the buffer as a bare Return, so a
+// TUI submits at the first one and the rest of the prompt lands in the input
+// box of the turn that just started, unsent. With it the buffer is wrapped in
+// bracketed-paste markers, which the agent reads as literal text, and the Enter
+// that follows submits the whole thing. tmux only emits the markers when the
+// application has asked for bracketed paste, so this is inert where it is not.
+// Arguments the caller wants on the agent's own command line, appended last,
+// after everything the harness builder decided. headless neither reads nor
+// validates them: this is for what one agent needs and headless has no notion
+// of, such as `agy --project NAME`, which picks an Antigravity project that
+// the working directory does not imply. An agent that does not know the flag
+// refuses it, which is the agent's answer to give.
+function withAgentArgs(built: BuiltCommand, parsed: ParsedArgs): BuiltCommand {
+  return parsed.agentArgs.length === 0
+    ? built
+    : { ...built, args: [...built.args, ...parsed.agentArgs] };
+}
+
 function buildTmuxSendCommands(sessionName: string, prompt: string): TmuxSendCommands {
   const promptBuffer = `${sessionName}-send`;
   return {
     sessionName,
     commands: [
       { command: "tmux", args: ["set-buffer", "-b", promptBuffer, prompt] },
-      { command: "tmux", args: ["paste-buffer", "-d", "-b", promptBuffer, "-t", sessionName] },
+      { command: "tmux", args: ["paste-buffer", "-p", "-d", "-b", promptBuffer, "-t", sessionName] },
       { command: "tmux", args: ["send-keys", "-t", sessionName, "Enter"] },
     ],
   };
@@ -3025,6 +3066,34 @@ function realWorkspaceForLock(workDir: string): string {
 
 function claimLockScope(agent: AgentName, workDir: string): string {
   return agent === "antigravity" ? "__global_antigravity_brain__" : realWorkspaceForLock(workDir);
+}
+
+/**
+ * Finds the transcript a run is writing, for following it: the first one that
+ * did not exist when the run started and was asked the run's prompt. Other
+ * runs of the same harness may start transcripts meanwhile, so a new one is
+ * not enough on its own when there is a prompt to tell them apart by.
+ */
+function newTranscriptFinder(agent: AgentName, workDir: string, env: Env, prompt: string): () => string | undefined {
+  const startedAt = new Date().toISOString();
+  const listed = (partial: Parameters<typeof resolveLatestNativeTranscripts>[3]) =>
+    resolveLatestNativeTranscripts(agent, workDir, env, partial, 20, claimTranscriptOptions(agent))
+      .flatMap((transcript) => (transcript.kind === "jsonl" ? [transcript.path] : []));
+  const before = new Set(listed({}));
+  const asked = prompt.split(/\r?\n/).map((line) => line.trim()).find(Boolean)?.slice(0, 200);
+  return () => listed({ startedAt }).find((path) => {
+    if (before.has(path)) return false;
+    if (!asked) return true;
+    try {
+      // The first record is the prompt the run was given. Compared decoded,
+      // since how the harness escapes it in the file is its own business.
+      const first = readFileSync(path, "utf8").split("\n", 1)[0] ?? "";
+      return JSON.stringify(JSON.parse(first)).includes(JSON.stringify(asked).slice(1, -1));
+    } catch {
+      // Not written yet, or only half of it: asked again at the next poll.
+      return false;
+    }
+  });
 }
 
 function claimTranscriptOptions(agent: AgentName): Parameters<typeof resolveLatestNativeTranscripts>[5] {
@@ -4049,6 +4118,16 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     if (parsed.debug && parsed.tmux) {
       throw new CliError("--debug cannot be used with --tmux");
     }
+    // Progress is a reading of the captured trace: a run that streams it, or
+    // shows the agent itself in tmux, has nothing for it to add.
+    for (const [given, flag] of [
+      [parsed.json, "--json"],
+      [parsed.debug, "--debug"],
+      [parsed.sdkFormat !== undefined, "--sdk-format"],
+      [parsed.tmux || parsed.attach, "--tmux or --attach"],
+    ] as const) {
+      if (parsed.progress && given) throw new CliError(`--progress cannot be used with ${flag}`);
+    }
     if (parsed.tmuxName !== undefined && !parsed.tmux) {
       throw new CliError("--name can only be used with --tmux");
     }
@@ -4117,6 +4196,14 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     } catch (error) {
       throw toCliError(error);
     }
+    // opencode takes any other name without complaint and starts on its own
+    // default model instead, so a display name would pass unnoticed.
+    const opencodeModel = parsed.agent === "opencode" ? configuredDefaults.model : undefined;
+    if (opencodeModel !== undefined && !/^[^/\s]+\/\S+$/.test(opencodeModel)) {
+      throw new CliError(
+        `opencode needs its model as provider/model, not ${JSON.stringify(opencodeModel)}; \`opencode models\` lists them`,
+      );
+    }
     const commandTimeoutSeconds = parsed.timeoutSeconds ?? config.general.timeoutSeconds;
     const modalTimeoutSeconds = parsed.modalTimeoutSeconds ?? commandTimeoutSeconds ?? DEFAULT_MODAL_TIMEOUT_SECONDS;
     const cwd = validateWorkDir(parsed.workDir);
@@ -4142,7 +4229,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         ? readStoredSession(env, parsed.agent, parsed.sessionAlias)?.profile
         : undefined
     );
-    const prompt = await resolvePrompt(parsed, deps, { forceText: parsed.tmux || parsed.role !== undefined || parsed.runId !== undefined });
+    const prompt = await resolvePrompt(parsed, deps, {
+      forceText: parsed.tmux || parsed.role !== undefined || parsed.runId !== undefined,
+      allowEmpty: parsed.attach || parsed.tmux,
+    });
     const allow = configuredDefaults.allow ?? roleDefaultAllow(parsed.role);
     if (parsed.runId && parsed.role === "orchestrator" && allow === "read-only") {
       throw new CliError("--role orchestrator with --run cannot use --allow read-only; it must be able to launch child nodes and update run state");
@@ -4310,18 +4400,18 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         parsed.agent === "opencode" && parsed.wait
           ? buildWithForkAllow("opencode", tmuxCommandOptions, buildInteractiveOpencodeRun)
           : buildInteractiveAgentCommand(parsed.agent, tmuxCommandOptions, env);
+      const tmuxCommandWithExtra = withAgentArgs(tmuxCommand, parsed);
       const reasoningWarning = unsupportedReasoningEffortWarning(
         parsed.agent,
         configuredDefaults.reasoningEffort,
         "tmux",
-        parsed.wait,
       );
       if (reasoningWarning) {
         stderr(reasoningWarning);
       }
       const tmuxCommands = buildTmuxCommands(
         parsed.agent,
-        tmuxCommand,
+        tmuxCommandWithExtra,
         tmuxPrompt,
         cwd,
         env,
@@ -4514,7 +4604,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
       timeoutSeconds: parsed.modal ? modalTimeoutSeconds : commandTimeoutSeconds,
     }, commandSessionPlan);
     const buildAttemptCommand = (attemptEnv: Env, options: BuildOptions): BuiltCommand => {
-      let built = withRunEnvironment(buildAgentCommand(parsed.agent!, options, attemptEnv), parsed.runId, nodeId);
+      let built = withAgentArgs(
+        withRunEnvironment(buildAgentCommand(parsed.agent!, options, attemptEnv), parsed.runId, nodeId),
+        parsed,
+      );
       const masks = Object.fromEntries(Object.entries(attemptEnv).filter(([, value]) => value === undefined));
       if (Object.keys(masks).length) built = { ...built, env: { ...built.env, ...masks } };
       if (parsed.docker) {
@@ -4590,8 +4683,18 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           write: stderr,
         })
       : undefined;
+    // Progress replaces the spinner: both say the agent is working, and the
+    // spinner redrawing its line would tear the lines progress writes.
+    const progress = parsed.progress ? new ProgressRenderer(parsed.agent, stderr, cwd ?? process.cwd()) : undefined;
+    // Antigravity prints only its reply; what it does is in its transcript.
+    const transcriptProgress = progress && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal
+      ? new TranscriptFollower(
+        newTranscriptFinder(parsed.agent, cwd ?? process.cwd(), env, composedPrompt),
+        new ProgressRenderer(parsed.agent, stderr, cwd ?? process.cwd()),
+      )
+      : undefined;
     const waitingSpinner =
-      stdoutHandling === "capture" && stderrIsTTY && !statusReporter && !parsed.sdkFormat
+      stdoutHandling === "capture" && stderrIsTTY && !statusReporter && !parsed.sdkFormat && !progress
         ? createWaitingSpinner(
             waitingSpinnerLabel(parsed.agent, configuredDefaults, env, env.NO_COLOR === undefined, effectiveProfile),
             stderr,
@@ -4603,6 +4706,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     };
     statusReporter?.start();
     waitingSpinner?.start();
+    transcriptProgress?.start();
     let result: ExecuteResult | undefined;
     let billingResult: BillingRunResult | undefined;
     const piCompletion = parsed.agent === "pi" ? new PiCompletionObserver() : undefined;
@@ -4691,6 +4795,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
               attempt.timeoutSeconds ?? modalTimeoutSeconds,
               (text) => {
                 piCompletion?.write(text);
+                progress?.feed(text);
                 attempt.observe(text);
                 if (stdoutHandling === "capture") commandStdoutLog?.(text);
               },
@@ -4721,6 +4826,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
               stdout: commandStdout, stdoutHandling,
               stdoutLog: (text) => {
                 piCompletion?.write(text);
+                progress?.feed(text);
                 attempt.observe(text);
                 commandStdoutLog?.(text);
               }, stderr: commandStderr,
@@ -4735,6 +4841,8 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           });
       } finally {
         piCompletion?.end();
+        progress?.flush();
+        transcriptProgress?.stop();
         waitingSpinner?.stop();
         antigravityUsageTrace = antigravityUsageCapture?.read() ?? "";
         antigravityUsageCapture?.cleanup();

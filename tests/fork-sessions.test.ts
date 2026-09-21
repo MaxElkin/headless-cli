@@ -37,6 +37,12 @@ function fakeTmux(dir: string): { env: NodeJS.ProcessEnv; home: string; log: () 
       "const args = process.argv.slice(2);",
       "appendFileSync(process.env.TMUX_LOG, args.join(' ') + '\\n');",
       "if (args[0] === 'has-session') process.exit(process.env.TMUX_LIVE ? 0 : 1);",
+      "if (args[0] === 'new-session' && process.env.TMUX_OPENCODE_SESSION) {",
+      "  const db = require('node:path').join(process.env.HOME, '.local', 'share', 'opencode', 'opencode.db');",
+      "  mkdirSync(dirname(db), { recursive: true });",
+      "  const sql = `create table if not exists session (id text, directory text, time_updated integer); insert into session values ('${process.env.TMUX_OPENCODE_SESSION}', '${process.env.TMUX_CWD}', ${Date.now()});`;",
+      "  require('node:child_process').execFileSync('sqlite3', [db, sql]);",
+      "}",
       "if (args[0] === 'new-session' && process.env.TMUX_ROLLOUT) {",
       "  mkdirSync(dirname(process.env.TMUX_ROLLOUT), { recursive: true });",
       "  writeFileSync(process.env.TMUX_ROLLOUT, JSON.stringify({ type: 'session_meta', payload: { cwd: process.env.TMUX_CWD } }) + '\\n');",
@@ -52,6 +58,8 @@ function fakeTmux(dir: string): { env: NodeJS.ProcessEnv; home: string; log: () 
       TMUX: undefined,
       TMUX_LIVE: undefined,
       TMUX_ROLLOUT: undefined,
+      TMUX_OPENCODE_SESSION: undefined,
+      OPENCODE_DATA_HOME: undefined,
       CODEX_HOME: undefined,
       TMUX_LOG: logFile,
       HOME: home,
@@ -125,6 +133,35 @@ test("a new Codex tmux session records the id of the transcript it creates", asy
     const result = await run(["codex", "--tmux", "--session", "demo", "--prompt", "hi", "--work-dir", dir], { env });
     assert.equal(result.code, 0, result.stderr);
     assert.equal(readStoredSession(env, "codex", "demo")?.nativeId, id);
+  });
+});
+
+test("interactive OpenCode resume passes the session it continues", () => {
+  const command = withForkInteractiveResume(
+    "opencode",
+    { sessionMode: "resume", sessionId: "ses_1" },
+    { command: "opencode", args: ["--model", "openai/gpt-5.4"] },
+  );
+  assert.deepEqual(command.args, ["--model", "openai/gpt-5.4", "--session", "ses_1"]);
+});
+
+test("a dead OpenCode tmux session with a stored id is relaunched resuming it", async () => {
+  await withDir(async (dir) => {
+    const tmux = fakeTmux(dir);
+    writeStoredSession(tmux.env, { agent: "opencode", alias: "demo", nativeId: "ses_abc" });
+    const result = await run(["opencode", "--tmux", "--session", "demo", "--prompt", "hi", "--print-command"], { env: tmux.env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /opencode --model \S+ .*--session ses_abc/);
+  });
+});
+
+test("a new OpenCode tmux session records the session it creates for the work dir", async () => {
+  await withDir(async (dir) => {
+    const tmux = fakeTmux(dir);
+    const env = { ...tmux.env, TMUX_CWD: dir, TMUX_OPENCODE_SESSION: "ses_new" };
+    const result = await run(["opencode", "--tmux", "--session", "demo", "--prompt", "hi", "--work-dir", dir], { env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(readStoredSession(env, "opencode", "demo")?.nativeId, "ses_new");
   });
 });
 

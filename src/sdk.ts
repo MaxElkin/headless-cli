@@ -1,4 +1,5 @@
 import { extractFinalMessage, extractNativeSessionId } from "./output.js";
+import { traceEvents, type TraceEvent } from "./trace-events.js";
 import type { AgentName } from "./types.js";
 
 export const SDK_PROTOCOL_VERSION = 1;
@@ -31,6 +32,8 @@ export interface SdkTraceEnvelope {
   data: {
     agent: AgentName;
     value?: unknown;
+    /** `value` in the shape shared by every harness whose trace is known; absent when it says nothing worth showing. */
+    events?: TraceEvent[];
     raw?: string;
     partial?: boolean;
     sequence?: number;
@@ -118,6 +121,8 @@ export class SdkTraceWriter {
     const data: SdkTraceEnvelope["data"] = { agent: this.agent };
     try {
       data.value = JSON.parse(line) as unknown;
+      const events = traceEvents(this.agent, data.value);
+      if (events.length > 0) data.events = events;
     } catch {
       data.raw = line;
     }

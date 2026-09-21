@@ -415,7 +415,7 @@ test("CLI tmux print-command includes reasoning effort flags", async () => {
   assert.match(stdout.join(""), /codex .* -c '\\''model_reasoning_effort="high"'\\'' hello/);
 });
 
-test("CLI tmux warns when reasoning effort is unsupported", async () => {
+test("CLI tmux hands opencode's TUI its effort as the variant of its agents", async () => {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const code = await runCli(["opencode", "--tmux", "--reasoning-effort", "high", "--prompt", "hello", "--print-command"], {
@@ -424,8 +424,21 @@ test("CLI tmux warns when reasoning effort is unsupported", async () => {
   });
 
   assert.equal(code, 0);
-  assert.match(stdout.join(""), /opencode --model openai\/gpt-5\.4 --dangerously-skip-permissions/);
-  assert.match(stderr.join(""), /reasoning effort is not supported by opencode in tmux mode and was ignored/);
+  const agent = { model: "openai/gpt-5.4", variant: "high" };
+  assert.ok(stdout.join("").includes(`OPENCODE_CONFIG_CONTENT='\\''${JSON.stringify({ agent: { build: agent, plan: agent } })}'\\''`), stdout.join(""));
+  assert.match(stdout.join(""), /opencode --model openai\/gpt-5\.4/);
+  assert.doesNotMatch(stderr.join(""), /reasoning effort/);
+});
+
+test("CLI refuses an opencode model that is not provider/model", async () => {
+  const stderr: string[] = [];
+  const code = await runCli(["opencode", "--model", "GPT-5.6 Luna", "--prompt", "hello", "--print-command"], {
+    stdout: () => {},
+    stderr: (text) => stderr.push(text),
+  });
+
+  assert.equal(code, 2);
+  assert.match(stderr.join(""), /opencode needs its model as provider\/model, not "GPT-5\.6 Luna"/);
 });
 
 test("CLI tmux print-command includes allow mode flags", async () => {

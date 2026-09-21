@@ -114,11 +114,14 @@ the next launch with that name resumes the conversation:
 | Claude | `--session-id <uuid>`, generated up front | `claude --resume <id>` |
 | Codex | id claimed from the rollout that appears after launch | `codex resume <id>` |
 | Antigravity | id claimed from the `brain/<id>` folder that appears after launch | `agy --conversation <id>` |
+| OpenCode | id claimed from the session row that appears in `opencode.db` for the work dir | `opencode --session <id>` |
 
-Codex and Antigravity cannot be given an id, so `src/fork/sessions.ts` claims it. It holds the same
-launch lock upstream's `--wait` claim tier uses, snapshots the existing transcripts, launches, and then
-polls for a new one until the tmux session exits or 30 seconds pass
+Codex, Antigravity and OpenCode cannot be given an id, so `src/fork/sessions.ts` claims it. It holds the
+same launch lock upstream's `--wait` claim tier uses, snapshots the existing transcripts, launches, and
+then polls for a new one until the tmux session exits or 30 seconds pass
 (`HEADLESS_FORK_CLAIM_TIMEOUT_MS`). If none appears it warns, and the session will not be resumable.
+OpenCode writes its session row only with the first message, so a session launched without a prompt is
+claimed only if a message is sent within the timeout.
 
 One-shot and tmux runs share the store, so a conversation started with `headless claude --session x`
 can be continued with `headless claude --attach --session x`, and the other way round.
@@ -130,7 +133,7 @@ Other agents are unchanged.
 Upstream edits:
 
 - `src/agents.ts`: `buildInteractiveAgentCommand` goes through `withForkInteractiveResume`, because
-  upstream's interactive Claude command has no resume case.
+  upstream's interactive Claude and OpenCode commands have no resume case.
 - `src/cli.ts`, in the new tmux session path: `planForkTmuxSession` and its identity in the command
   options; `beginForkTmuxClaim` before the launch and `claimForkTmuxSession` after it; `release` in
   the `finally`; `recordForkTmuxSession` after a successful launch.
