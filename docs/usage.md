@@ -92,18 +92,23 @@ headless --prompt "identity" --print-command --json
 headless codex --prompt "Fix the failing tests" --debug
 ```
 
-`--progress` shows the run on stderr as it goes — what the agent says, one line per tool call, and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams; OpenCode reports a tool call once it has finished. Antigravity prints no events, so for a local run its transcript under `brain/<conversation>/` is followed instead: the first one started after the run and asked its prompt. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
+`--progress` shows the run on stderr as it goes — its thinking set apart with `💭`, as is what it says on the way, its reply with `💬`, one line per tool call — `📖` reading or searching, `📝` editing, `🔧` anything else, a shell command included — and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams; OpenCode reports a tool call once it has finished. Antigravity prints no events, so for a local run its transcript under `brain/<conversation>/` is followed instead: the first one started after the run and asked its prompt. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
 
 ```bash
 headless codex --prompt "Fix the failing tests" --progress
 ```
 
 ```text
-● Bash(npm test)
+
+💭 Looking into the failing tests.
+
+🔧 Bash(npm test)
   ⎿ failed: exit 1: 2 failing
-● Edit(src/parser.ts)
-● Bash(npm test)
-● Fixed the off-by-one in the tokenizer; all tests pass.
+📝 Edit(src/parser.ts)
+🔧 Bash(npm test)
+
+💬 Fixed the off-by-one in the tokenizer; all tests pass.
+
 ```
 
 With `--sdk-format ndjson`, each `trace` envelope also carries `data.events`: the same events as `--progress` shows, in one shape for every agent whose trace is known (`message`, `thinking`, `tool`, `tool_result`, `error`), beside the native record in `data.value`. It is absent when a record holds nothing worth showing.

@@ -325,18 +325,36 @@ function relative(text: string, workDir: string | undefined): string {
 }
 
 /**
+ * What a tool call is marked with: reading and editing apart from the rest,
+ * so a run that changes files reads differently from one that looks around.
+ * The names are the ones every harness's trace is put into here; a command
+ * is a command whatever it does, since what it does is its own text.
+ */
+const toolMarks: Record<string, string> = {
+  Read: "📖", Grep: "📖", Glob: "📖", LS: "📖", WebFetch: "📖", WebSearch: "📖",
+  Edit: "📝", MultiEdit: "📝", Write: "📝", NotebookEdit: "📝",
+};
+
+function toolMark(name: string): string {
+  return toolMarks[name] ?? "🔧";
+}
+
+/**
  * One event as the lines a person reads, or nothing for one not worth a line.
  *
- * Thinking is not shown: it is the agent talking to itself, long, and said
- * again in what it then does. A tool call is one line, its subject clipped,
- * but for a command, which is shown whole; what the agent says is shown whole
- * too, since that is the part written for a reader.
+ * Thinking is set apart with a thought bubble and blank lines, so it remains
+ * readable without being confused with the agent's outward messages. A tool
+ * call is one line, its subject clipped, but for a command, which is shown
+ * whole; what the agent says is shown whole too, since that is the part
+ * written for a reader.
  */
 export function renderTraceEvent(event: TraceEvent, workDir?: string): string | undefined {
   switch (event.kind) {
     case "message": {
+      // The reply, set apart as a thought is, with its own mark: it is what
+      // the run came to, not one more thing done on the way.
       const [head, ...rest] = event.text.trim().split(/\r?\n/);
-      return [`● ${head}`, ...rest.map((line) => (line ? `  ${line}` : ""))].join("\n") + "\n";
+      return ["", `💬 ${head}`, ...rest.map((line) => (line ? `   ${line}` : "")), "", ""].join("\n");
     }
     case "tool": {
       // A command is shown whole: cut short, the part that says what it does
@@ -344,15 +362,27 @@ export function renderTraceEvent(event: TraceEvent, workDir?: string): string | 
       const subject = event.name === "Bash"
         ? relative(event.summary, workDir).trim().split(/\r?\n/).join("\n  ")
         : clipped(relative(event.summary, workDir));
-      return `● ${event.name}${subject ? `(${subject})` : ""}\n`;
+      return `${toolMark(event.name)} ${event.name}${subject ? `(${subject})` : ""}\n`;
     }
     case "tool_result":
       return `  ⎿ failed${event.detail ? `: ${clipped(relative(event.detail, workDir))}` : ""}\n`;
     case "error":
       return `✗ ${clipped(event.text)}\n`;
-    case "thinking":
-      return undefined;
+    case "thinking": {
+      const [head, ...rest] = thoughtLines(event.text);
+      if (head === undefined) return undefined;
+      return ["", `💭 ${head}`, ...rest.map((line) => (line ? `   ${line}` : "")), "", ""].join("\n");
+    }
   }
+}
+
+/**
+ * A thought's lines as shown. Codex's summaries head each part of a thought in
+ * bold, which in a terminal is two pairs of asterisks around what the bubble
+ * already sets apart, so a line that is bold throughout is shown plain.
+ */
+function thoughtLines(text: string): string[] {
+  return text.trim().split(/\r?\n/).map((line) => line.replace(/^\s*\*\*(.+)\*\*\s*$/, "$1"));
 }
 
 /**
@@ -365,6 +395,18 @@ export function renderTraceEvent(event: TraceEvent, workDir?: string): string | 
  */
 export class ProgressRenderer {
   private pending = "";
+  /**
+   * The last message, held until what follows it says what it was. A message
+   * with more work after it is the agent saying what it is about to do —
+   * Codex writes several such in a turn, as the same kind of item as its
+   * answer — and is shown as a thought; only the last is the reply, shown
+   * with 💬. The events carry no mark of their own to tell the two apart.
+   */
+  private held: TraceEvent | undefined;
+  /** The previous thought's lines: Codex repeats a part it already sent. */
+  private thought: string[] = [];
+  /** Whether what was written last ended in a blank line. */
+  private blank = false;
 
   constructor(
     private readonly agent: AgentName,
@@ -385,6 +427,37 @@ export class ProgressRenderer {
   flush(): void {
     if (this.pending) this.line(this.pending);
     this.pending = "";
+    if (this.held) this.emit(this.held);
+    this.held = undefined;
+  }
+
+  private event(event: TraceEvent): void {
+    if (this.held) {
+      const said = this.held;
+      this.held = undefined;
+      this.event({ kind: "thinking", text: (said as { text: string }).text });
+    }
+    if (event.kind === "message") {
+      this.held = event;
+      return;
+    }
+    if (event.kind === "thinking") {
+      const lines = thoughtLines(event.text).filter((line) => !line.trim() || !this.thought.includes(line));
+      this.thought = thoughtLines(event.text);
+      if (!lines.some((line) => line.trim())) return;
+      event = { kind: "thinking", text: lines.join("\n") };
+    }
+    this.emit(event);
+  }
+
+  private emit(event: TraceEvent): void {
+    let rendered = renderTraceEvent(event, this.workDir);
+    if (!rendered) return;
+    // A thought is set apart by blank lines, one each side: two thoughts in a
+    // row share the one between them.
+    if (this.blank && rendered.startsWith("\n")) rendered = rendered.slice(1);
+    this.write(rendered);
+    this.blank = rendered.endsWith("\n\n");
   }
 
   private line(line: string): void {
@@ -396,10 +469,7 @@ export class ProgressRenderer {
     } catch {
       return;
     }
-    for (const event of traceEvents(this.agent, value)) {
-      const rendered = renderTraceEvent(event, this.workDir);
-      if (rendered) this.write(rendered);
-    }
+    for (const event of traceEvents(this.agent, value)) this.event(event);
   }
 }
 

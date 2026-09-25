@@ -11,6 +11,8 @@ Fork of [RobertTLange/headless-cli](https://github.com/RobertTLange/headless-cli
 | [Attach](#attach) | `--attach`, which launches a tmux session (or reuses a live one) and attaches the terminal to it |
 | [Sessions](#sessions) | `--tmux --session <name>` resumes the agent's conversation when the tmux session is gone |
 | [Clean sessions](#clean-sessions) | `--clean-before` and `--clean-after`, which let one session name start a new conversation |
+| [Structured output](#structured-output) | `--json-schema`, which holds the agent's reply to a JSON Schema |
+| [Visible thinking](#visible-thinking) | `--progress` shows the agent's thinking with 💭 and its reply with 💬, and asks Codex for its thinking |
 
 ## Where fork code goes
 
@@ -175,3 +177,79 @@ Upstream edits, all in `src/cli.ts`:
 - An `applyForkClean` call before the tmux session check, so the store is cleaned before anything reads it.
 
 Test: `fork-clean`.
+
+## Structured output
+
+`--json-schema <schema>` says what the agent's final reply must look like. The schema is JSON as
+written on the command line, or a path to a file holding it; either way it is parsed before an agent
+is launched, so a schema that is not one is a refusal rather than an error halfway through a run.
+
+Three harnesses can enforce a schema themselves, each spelling it differently, and the rest cannot
+enforce anything at all. Both routes are taken silently by nobody: a run says on stderr which one it
+took.
+
+| Agent | Route |
+| --- | --- |
+| Claude, Antigravity | `--json-schema <text>` |
+| Codex | `--output-schema <file>`, written under the system temporary directory |
+| Cursor, Gemini, OpenCode, Pi | appended to the prompt: "End your reply with one JSON object..." |
+
+Codex's flag goes before the trailing `-` that says the prompt comes on stdin, which is a positional
+rather than a flag's value.
+
+The caller is expected to check the reply as well. A prompted schema is a request rather than a
+guarantee, and even an enforced one says nothing about whether the values make sense.
+
+`--json-schema` is rejected with `--attach` and `--tmux`, which answer to a person rather than to a
+caller reading a reply, and with `--docker` and `--modal`, which run the agent where this process's
+files are not. With `--prompt-file` it is rejected only on the agents that have no flag, since there
+the prompt is not this process's to rewrite.
+
+Upstream edits, all in `src/cli.ts`:
+
+- `ParsedArgs.forkJsonSchema` and its case in `parseArgs`.
+- One help line.
+- A `validateForkSchema` call after `validateForkClean`.
+- In the one-shot path: `loadForkSchema` and the stderr note, `withForkSchemaPrompt` around the
+  prompt in the native options, and `withForkSchemaArgs` around the built command.
+
+Test: `fork-schema`.
+
+## Visible thinking
+
+`--progress` shows the agent's thinking where upstream drops it, as a block of its own with a blank line
+before and after and `💭` in front, its later lines indented under the first:
+
+```
+🔧 Bash(git diff --cached --stat)
+
+💭 Confirming the change is in shared code
+
+💭 The change is in commonMain; checking the platform modules next.
+
+🔧 Bash(ls syncthing/app/frontend/form-factor)
+
+💬 The change is in commonMain, so it affects every platform.
+
+```
+
+- **The reply** is set apart the same way, with `💬`. Only the last message is the reply: a message
+  with more work after it is the agent saying what it is about to do, and is shown as a thought.
+  Codex writes those as the same kind of item as its answer, with nothing to tell them apart, so each
+  message is held until the next event, or the end of the run, says which it was.
+- **Blank lines** are shared: two blocks in a row have one blank line between them, not two.
+- **Codex's summaries** head each part of a thought in `**bold**`, which is shown without the
+  asterisks, and repeat a part already sent, which is not shown again.
+
+A harness shows only the thinking its event stream carries. Codex carries none unless asked, so with
+`--progress` it is given `-c model_reasoning_summary="detailed"`, before the trailing `-`. A run
+without `--progress` is not, since nobody reads the summaries and they are billed output.
+
+Upstream edits:
+
+- `src/trace-events.ts`: the `thinking` and `message` cases of `renderTraceEvent`, the first of
+  which rendered nothing, and `ProgressRenderer`'s holding of messages, repeated parts and blank lines.
+- `src/cli.ts`: the import and `withForkProgressArgs` around the built command, beside
+  `withForkSchemaArgs`.
+
+Tests: `fork-progress`, and the thinking cases in `trace-events`.

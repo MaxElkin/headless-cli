@@ -156,6 +156,11 @@ import type { AgentName, AllowMode, BillingMode, BuildOptions, BuiltCommand, Env
 import { buildWithForkAllow, isForkAllowMode } from "./fork/allow.js";
 import { ProgressRenderer, TranscriptFollower } from "./trace-events.js";
 import { applyForkClean, validateForkClean } from "./fork/clean.js";
+import {
+  describeForkSchema, loadForkSchema, validateForkSchema, withForkSchemaArgs,
+  withForkSchemaPrompt,
+} from "./fork/schema.js";
+import { withForkProgressArgs } from "./fork/progress.js";
 import { buildForkAttachCommand, forkAttachTmuxSession, validateForkAttach } from "./fork/attach.js";
 import { beginForkTmuxClaim, claimForkTmuxSession, planForkTmuxSession, recordForkTmuxSession } from "./fork/sessions.js";
 
@@ -168,6 +173,7 @@ interface ParsedArgs {
   forkAttach?: boolean;
   forkCleanBefore?: boolean;
   forkCleanAfter?: boolean;
+  forkJsonSchema?: string;
   send: boolean;
   sendSession?: string;
   rename: boolean;
@@ -352,6 +358,7 @@ function usage(): string {
     "  --session <name>     Start or resume a named Headless session.",
     "  --clean-before       With --session, start a new conversation (refused while its tmux session runs).",
     "  --clean-after        With --session, start a new conversation on the first launch after this one stops.",
+    "  --json-schema <s>    JSON Schema, or a path to one, the final reply must match. Given to the harness's own flag where it has one (claude, codex, antigravity), asked for in the prompt otherwise.",
     "  attach [session]     Attach to one or all active headless tmux sessions.",
     "  --all                With attach, tile all active headless tmux sessions.",
     "  send <session-name>  Send a message to an existing headless tmux session.",
@@ -632,6 +639,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--clean-after":
         parsed.forkCleanAfter = true;
+        break;
+      case "--json-schema":
+        parsed.forkJsonSchema = takeValue(args, arg);
         break;
       case "--all":
         parsed.attachAll = true;
@@ -4139,6 +4149,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     }
     validateSessionAlias(parsed.sessionAlias);
     validateForkClean(parsed);
+    validateForkSchema(parsed);
     const coordination = effectiveCoordination(parsed, config.general.coordination);
     if (
       parsed.docker &&
@@ -4596,18 +4607,24 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     const commandSessionPlan = dockerSessionHome && sessionPlan
       ? { ...sessionPlan, nativeId: dockerSessionNativeId(parsed.agent, sessionPlan.nativeId, dockerSessionHome) }
       : sessionPlan;
+    // Structured output, where the caller asked for it: the schema reaches the
+    // harness's own flag below, or the agent through the prompt here.
+    const forkSchema = loadForkSchema(parsed.forkJsonSchema);
+    if (forkSchema && !parsed.printCommand) {
+      process.stderr.write(`${describeForkSchema(parsed.agent)}\n`);
+    }
     const nativeOptions = applySessionPlan({
-      prompt: composedPrompt,
+      prompt: withForkSchemaPrompt(parsed.agent, composedPrompt, forkSchema),
       promptFile: parsed.role || parsed.runId ? undefined : prompt.promptFile,
       workDir: cwd ?? process.cwd(), model: configuredDefaults.model, profile: effectiveProfile,
       allow, fast, reasoningEffort: configuredDefaults.reasoningEffort,
       timeoutSeconds: parsed.modal ? modalTimeoutSeconds : commandTimeoutSeconds,
     }, commandSessionPlan);
     const buildAttemptCommand = (attemptEnv: Env, options: BuildOptions): BuiltCommand => {
-      let built = withAgentArgs(
+      let built = withForkProgressArgs(parsed.agent!, withForkSchemaArgs(parsed.agent!, withAgentArgs(
         withRunEnvironment(buildAgentCommand(parsed.agent!, options, attemptEnv), parsed.runId, nodeId),
         parsed,
-      );
+      ), forkSchema), parsed.progress);
       const masks = Object.fromEntries(Object.entries(attemptEnv).filter(([, value]) => value === undefined));
       if (Object.keys(masks).length) built = { ...built, env: { ...built.env, ...masks } };
       if (parsed.docker) {

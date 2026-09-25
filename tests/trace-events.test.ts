@@ -75,14 +75,14 @@ const codexNoise = [
   { type: "turn.completed", usage: { input_tokens: 1 } },
 ];
 
-test("Claude records become a message, tool calls and failed results; thinking is kept but not shown", () => {
+test("Claude records become a message, tool calls, failed results, and visible thinking", () => {
   assert.deepEqual(traceEvents("claude", claudeRead), [{ kind: "tool", name: "Read", summary: "/work/package.json" }]);
   // The command is what a Bash call is about, not its description.
   assert.deepEqual(traceEvents("claude", claudeBash), [{ kind: "tool", name: "Bash", summary: "npm test" }]);
   assert.deepEqual(traceEvents("claude", claudeText), [{ kind: "message", text: "The `name` field is `x`." }]);
   assert.deepEqual(traceEvents("claude", claudeToolFailed), [{ kind: "tool_result", ok: false, detail: "Exit code 1" }]);
   assert.deepEqual(traceEvents("claude", claudeThinking), [{ kind: "thinking", text: "The user wants me to read a file." }]);
-  assert.equal(renderTraceEvent(traceEvents("claude", claudeThinking)[0]!), undefined);
+  assert.equal(renderTraceEvent(traceEvents("claude", claudeThinking)[0]!), "\n💭 The user wants me to read a file.\n\n");
   // A result that did not fail is not worth a line: the call already had one.
   assert.deepEqual(traceEvents("claude", claudeToolOk), []);
   for (const record of claudeNoise) assert.deepEqual(traceEvents("claude", record), [], JSON.stringify(record));
@@ -178,10 +178,10 @@ test("A transcript is followed from when it appears, as it grows", async () => {
     assert.deepEqual(out, []);
     await appendFile(path, line.slice(30));
     follower.poll();
-    assert.deepEqual(out, ["● Read(a.md)\n", "● Bash(ls \"x y\")\n", "● something_new(Did a thing)\n"]);
+    assert.deepEqual(out, ["\n💭 Reading it.\n\n", "📖 Read(a.md)\n", "🔧 Bash(ls \"x y\")\n", "🔧 something_new(Did a thing)\n"]);
     await appendFile(path, `${JSON.stringify(agyReply)}\n`);
     follower.stop();
-    assert.equal(out.at(-1), "● It says A.\n");
+    assert.equal(out.at(-1), "\n💬 It says A.\n\n");
   } finally {
     rmSync(dir, { force: true, recursive: true });
   }
@@ -202,20 +202,49 @@ test("Codex's login-shell wrapper is taken off the command", () => {
   assert.equal(unwrapShellCommand("git status"), "git status");
 });
 
+test("A message followed by more work is a thought, and thoughts share their blank lines", () => {
+  const out: string[] = [];
+  const renderer = new ProgressRenderer("codex", (text) => out.push(text));
+  const item = (id: string, type: string, text: string) =>
+    `${JSON.stringify({ type: "item.completed", item: { id, type, text } })}\n`;
+  renderer.feed(item("1", "reasoning", "**Inspecting UI and tests**\n**Checking transition API usage**"));
+  renderer.feed(item("2", "reasoning", "**Inspecting UI and tests**\n**Inspecting UI and model**"));
+  renderer.feed(item("3", "agent_message", "SA found one remaining gap."));
+  renderer.feed(item("4", "agent_message", "Done."));
+  renderer.flush();
+  assert.equal(out.join(""), [
+    "",
+    "💭 Inspecting UI and tests",
+    "   Checking transition API usage",
+    "",
+    // The part already shown is not shown again.
+    "💭 Inspecting UI and model",
+    "",
+    "💭 SA found one remaining gap.",
+    "",
+    "💬 Done.",
+    "",
+    "",
+  ].join("\n"));
+});
+
 test("Events render as one line per call and the message whole, paths made relative", () => {
   const work = "/work";
-  assert.equal(renderTraceEvent({ kind: "tool", name: "Read", summary: "/work/package.json" }, work), "● Read(package.json)\n");
-  assert.equal(renderTraceEvent({ kind: "tool", name: "mcp.x", summary: "" }), "● mcp.x\n");
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Read", summary: "/work/package.json" }, work), "📖 Read(package.json)\n");
+  assert.equal(renderTraceEvent({ kind: "tool", name: "mcp.x", summary: "" }), "🔧 mcp.x\n");
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Write", summary: "a.md" }), "📝 Write(a.md)\n");
   assert.equal(renderTraceEvent({ kind: "tool_result", ok: false, detail: "exit 1: boom" }), "  ⎿ failed: exit 1: boom\n");
-  assert.equal(renderTraceEvent({ kind: "message", text: "One.\n\nTwo." }), "● One.\n\n  Two.\n");
+  assert.equal(renderTraceEvent({ kind: "message", text: "One.\n\nTwo." }), "\n💬 One.\n\n   Two.\n\n");
+  assert.equal(renderTraceEvent({ kind: "thinking", text: "One.\n\nTwo." }), "\n💭 One.\n\n   Two.\n\n");
+  assert.equal(renderTraceEvent({ kind: "thinking", text: "**Checking the tests**" }), "\n💭 Checking the tests\n\n");
   assert.equal(renderTraceEvent({ kind: "error", text: "quota" }), "✗ quota\n");
   const long = renderTraceEvent({ kind: "tool", name: "Grep", summary: "x".repeat(400) })!;
   assert.ok(long.length < 200 && long.includes("…"), long);
-  assert.equal(renderTraceEvent({ kind: "tool", name: "Grep", summary: "a\nb" }), "● Grep(a …)\n");
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Grep", summary: "a\nb" }), "📖 Grep(a …)\n");
   // A command is never cut, however long, and keeps its lines.
   const command = `cat /work/${"x".repeat(400)}.md`;
-  assert.equal(renderTraceEvent({ kind: "tool", name: "Bash", summary: command }, work), `● Bash(cat ${"x".repeat(400)}.md)\n`);
-  assert.equal(renderTraceEvent({ kind: "tool", name: "Bash", summary: "a &&\nb" }), "● Bash(a &&\n  b)\n");
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Bash", summary: command }, work), `🔧 Bash(cat ${"x".repeat(400)}.md)\n`);
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Bash", summary: "a &&\nb" }), "🔧 Bash(a &&\n  b)\n");
 });
 
 test("The renderer waits for a record split across chunks, and leaves lines that are not JSON alone", () => {
@@ -227,9 +256,9 @@ test("The renderer waits for a record split across chunks, and leaves lines that
   renderer.feed(line.slice(20));
   renderer.feed("not json at all\n");
   renderer.feed(JSON.stringify(claudeText));
-  assert.deepEqual(out, ["● Read(package.json)\n"]);
+  assert.deepEqual(out, ["📖 Read(package.json)\n"]);
   renderer.flush();
-  assert.deepEqual(out, ["● Read(package.json)\n", "● The `name` field is `x`.\n"]);
+  assert.deepEqual(out, ["📖 Read(package.json)\n", "\n💬 The `name` field is `x`.\n\n"]);
 });
 
 async function fakeAgent(dir: string, name: string, records: unknown[]): Promise<string> {
@@ -245,7 +274,9 @@ async function fakeAgent(dir: string, name: string, records: unknown[]): Promise
 test("CLI --progress shows the run on stderr and leaves stdout the final message alone", async () => {
   const dir = mkdtempSync(join(tmpdir(), "headless-progress-test-"));
   try {
-    const binDir = await fakeAgent(dir, "codex", [codexNoise[0], codexStarted, codexCompletedOk, codexMessage,
+    const binDir = await fakeAgent(dir, "codex", [codexNoise[0],
+      { type: "item.completed", item: { id: "item_thinking", type: "reasoning", text: "Checking the repository." } },
+      codexStarted, codexCompletedOk, codexMessage,
       { type: "item.completed", item: { id: "item_9", type: "agent_message", text: "Done." } }, codexNoise[2]]);
     const stdout: string[] = [];
     const stderr: string[] = [];
@@ -259,8 +290,11 @@ test("CLI --progress shows the run on stderr and leaves stdout the final message
     assert.equal(code, 0, stderr.join(""));
     assert.equal(stdout.join(""), "Done.\n");
     const shown = stderr.join("");
-    assert.match(shown, /● Bash\(sed -n '1,9p' \/work\/a\.md\)\n/);
-    assert.match(shown, /● Reading the onboarding first\.\n/);
+    assert.match(shown, /🔧 Bash\(sed -n '1,9p' \/work\/a\.md\)\n/);
+    assert.match(shown, /\n💭 Checking the repository\.\n\n/);
+    // A message with more work after it is what the agent is about to do, a
+    // thought; the last one is the reply.
+    assert.match(shown, /\n💭 Reading the onboarding first\.\n\n💬 Done\.\n\n$/);
     // No spinner: it would redraw over the lines progress writes.
     assert.doesNotMatch(shown, /\u001b\[|⠋/);
   } finally {
