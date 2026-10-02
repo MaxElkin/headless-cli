@@ -309,6 +309,7 @@ test("builds reasoning effort flags for supported agents", () => {
     "run",
     "--format",
     "json",
+    "--thinking",
     "--model",
     "openai/gpt-5.4",
     "--variant",
@@ -491,7 +492,7 @@ test("builds claude, cursor, gemini, opencode, and pi prompt commands", () => {
 
   assert.deepEqual(buildAgentCommand("opencode", { prompt: "hello", model: "oc-model" }, {}), {
     command: "opencode",
-    args: ["run", "--format", "json", "--model", "oc-model", "--dangerously-skip-permissions", "hello"],
+    args: ["run", "--format", "json", "--thinking", "--model", "oc-model", "--dangerously-skip-permissions", "hello"],
   });
 
   assert.deepEqual(buildAgentCommand("pi", { prompt: "hello", model: "pi-model" }, {}), {
@@ -770,6 +771,7 @@ test("builds native session commands for supported agents", () => {
     "run",
     "--format",
     "json",
+    "--thinking",
     "--model",
     "openai/gpt-5.4",
     "--dangerously-skip-permissions",
@@ -1111,7 +1113,7 @@ test("CLI applies model and reasoning defaults from ~/.headless/config.toml", as
     assert.equal(opencodeCode, 0);
     assert.equal(
       stdout.join(""),
-      "opencode run --format json --model openai/gpt-5.5 --variant high --dangerously-skip-permissions hello\n",
+      "opencode run --format json --thinking --model openai/gpt-5.5 --variant high --dangerously-skip-permissions hello\n",
     );
 
     stdout.length = 0;
@@ -1170,7 +1172,7 @@ test("CLI flags override ~/.headless/config.toml defaults", async () => {
     assert.equal(code, 0);
     assert.equal(
       stdout.join(""),
-      "opencode run --format json --model openai/gpt-5.4 --variant low --dangerously-skip-permissions hello\n",
+      "opencode run --format json --thinking --model openai/gpt-5.4 --variant low --dangerously-skip-permissions hello\n",
     );
   } finally {
     rmSync(dir, { force: true, recursive: true });
@@ -1189,7 +1191,7 @@ test("CLI falls back to built-in defaults when ~/.headless/config.toml is missin
     assert.equal(code, 0);
     assert.equal(
       stdout.join(""),
-      "opencode run --format json --model openai/gpt-5.4 --dangerously-skip-permissions hello\n",
+      "opencode run --format json --thinking --model openai/gpt-5.4 --dangerously-skip-permissions hello\n",
     );
   } finally {
     rmSync(dir, { force: true, recursive: true });
@@ -2081,7 +2083,7 @@ test("role config model is optional and falls back to agent config", async () =>
     });
 
     assert.equal(code, 0);
-    assert.match(stdout.join(""), /opencode run --format json --model openai\/gpt-agent --variant high/);
+    assert.match(stdout.join(""), /opencode run --format json --thinking --model openai\/gpt-agent --variant high/);
   } finally {
     rmSync(dir, { force: true, recursive: true });
   }
@@ -2115,7 +2117,7 @@ test("CLI print-command reads argument-mode prompt files", async () => {
     assert.equal(code, 0);
     assert.equal(
       stdout.join(""),
-      "opencode run --format json --model openai/gpt-5.4 --dangerously-skip-permissions 'from file'\n",
+      "opencode run --format json --thinking --model openai/gpt-5.4 --dangerously-skip-permissions 'from file'\n",
     );
   } finally {
     rmSync(dir, { force: true, recursive: true });
@@ -7118,7 +7120,7 @@ test("CLI executes fake binaries and propagates exit codes", async () => {
     assert.equal(code, 7);
     assert.equal(
       readFileSync(captureFile, "utf8"),
-      "run|--format|json|--model|openai/gpt-5.4|--dangerously-skip-permissions|hello",
+      "run|--format|json|--thinking|--model|openai/gpt-5.4|--dangerously-skip-permissions|hello",
     );
   } finally {
     rmSync(dir, { force: true, recursive: true });

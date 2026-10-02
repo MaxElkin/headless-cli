@@ -440,7 +440,8 @@ function buildInteractiveGemini(options: BuildOptions): BuiltCommand {
 }
 
 function buildOpencode(options: BuildOptions): BuiltCommand {
-  const args = ["run", "--format", "json"];
+  // Without --thinking, the JSON events leave out the reasoning parts.
+  const args = ["run", "--format", "json", "--thinking"];
   const model = options.model ?? DEFAULT_OPENCODE_MODEL;
 
   args.push("--model", model);

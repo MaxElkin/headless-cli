@@ -76,7 +76,7 @@ test("builds read-only commands for supported agents", () => {
 
   assert.deepEqual(buildAgentCommand("opencode", { prompt: "hello", allow: "read-only" }, {}), {
     command: "opencode",
-    args: ["run", "--format", "json", "--model", "openai/gpt-5.4", "hello"],
+    args: ["run", "--format", "json", "--thinking", "--model", "openai/gpt-5.4", "hello"],
     env: {
       OPENCODE_CONFIG_CONTENT:
         '{"permission":{"read":"allow","edit":"deny","bash":"deny","webfetch":"allow","websearch":"allow","codesearch":"allow","task":"deny"}}',
@@ -150,6 +150,7 @@ test("builds explicit yolo commands for supported agents", () => {
     "run",
     "--format",
     "json",
+    "--thinking",
     "--model",
     "openai/gpt-5.4",
     "--dangerously-skip-permissions",
