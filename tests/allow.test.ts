@@ -426,7 +426,14 @@ test("CLI tmux hands opencode's TUI its effort as the variant of its agents", as
 
   assert.equal(code, 0);
   const agent = { model: "openai/gpt-5.4", variant: "high" };
-  assert.ok(stdout.join("").includes(`OPENCODE_CONFIG_CONTENT='\\''${JSON.stringify({ agent: { build: agent, plan: agent } })}'\\''`), stdout.join(""));
+  const variants = Object.fromEntries(
+    ["none", "minimal", "low", "medium", "xhigh", "max"].map((name) => [name, { disabled: true }]),
+  );
+  const config = {
+    agent: { build: agent, plan: agent },
+    provider: { openai: { models: { "gpt-5.4": { variants } } } },
+  };
+  assert.ok(stdout.join("").includes(`OPENCODE_CONFIG_CONTENT='\\''${JSON.stringify(config)}'\\''`), stdout.join(""));
   assert.match(stdout.join(""), /opencode --model openai\/gpt-5\.4/);
   assert.doesNotMatch(stderr.join(""), /reasoning effort/);
 });

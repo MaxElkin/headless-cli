@@ -241,6 +241,19 @@ before and after and `💭` in front, its later lines indented under the first:
 - **Codex's summaries** head each part of a thought in `**bold**`, which is shown without the
   asterisks, and repeat a part already sent, which is not shown again.
 
+- **Hidden thinking.** OpenCode sends each block of thought even when its text is withheld, as an
+  OpenAI model's encrypted reasoning is. Such a block is shown as one line, `💭 (thought for 22s)`,
+  so that a long stretch without tool calls reads as thinking rather than a hang.
+
+- **Working line.** On a terminal, the last line is `⏳ Working… 12s`, redrawn each second with the
+  time since the last line progress wrote (`3m 05s` past a minute). It is cleared before each new
+  line and drawn again under it, so it never stays in the output, and a silent agent is told from a
+  hung one by whether its lines keep coming. Off a terminal it is not drawn.
+
+- **A resumed Antigravity conversation.** Antigravity's progress comes from its transcript, which a
+  run resuming a `--session` goes on writing rather than starting. That transcript is followed from
+  its size at launch, so the run's own steps show and the conversation's history does not.
+
 A harness shows only the thinking its event stream carries. Codex carries none unless asked, so with
 `--progress` it is given `-c model_reasoning_summary="detailed"`, before the trailing `-`. A run
 without `--progress` is not, since nobody reads the summaries and they are billed output.
@@ -249,7 +262,9 @@ Upstream edits:
 
 - `src/trace-events.ts`: the `thinking` and `message` cases of `renderTraceEvent`, the first of
   which rendered nothing, and `ProgressRenderer`'s holding of messages, repeated parts and blank lines.
+- `src/trace-events.ts`: the `hidden_thinking` event, from OpenCode's `reasoning` part without text.
 - `src/cli.ts`: the import and `withForkProgressArgs` around the built command, beside
-  `withForkSchemaArgs`.
+  `withForkSchemaArgs`; the `WorkingLine` (`src/fork/working.ts`) that progress and the agent's
+  stderr write through, started and stopped beside the transcript follower.
 
-Tests: `fork-progress`, and the thinking cases in `trace-events`.
+Tests: `fork-progress`, `fork-working`, and the thinking cases in `trace-events`.

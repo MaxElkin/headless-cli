@@ -159,16 +159,32 @@ function opencodeEnv(allow: AllowMode | undefined, extra?: Record<string, unknow
   return Object.keys(config).length > 0 ? { OPENCODE_CONFIG_CONTENT: JSON.stringify(config) } : undefined;
 }
 
+/** Every variant name opencode gives a reasoning model, for leaving one of them. */
+const OPENCODE_VARIANTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 /**
  * The TUI has no `--variant`, so an effort reaches it as config: the default
  * variant of the agents a session starts in. opencode applies an agent's
  * variant only while it runs the agent's own model, so the model is set there
  * as well as on the command line.
+ *
+ * The TUI sends its own variant before the agent's, though: the one saved for
+ * the model across sessions, or, in a continued session, its last message's.
+ * So the model is left with the effort's variant alone: any other saved or
+ * restored one is not the model's, the TUI sends none, and opencode takes the
+ * agent's.
  */
 function opencodeInteractiveConfig(model: string, effort: string | undefined): Record<string, unknown> | undefined {
   if (!effort) return undefined;
   const agent = { model, variant: effort };
-  return { agent: { build: agent, plan: agent } };
+  const slash = model.indexOf("/");
+  const variants = Object.fromEntries(
+    OPENCODE_VARIANTS.filter((name) => name !== effort).map((name) => [name, { disabled: true }]),
+  );
+  return {
+    agent: { build: agent, plan: agent },
+    provider: { [model.slice(0, slash)]: { models: { [model.slice(slash + 1)]: { variants } } } },
+  };
 }
 
 function commandWithOptionalEnv(command: string, args: string[], env: Env | undefined): BuiltCommand {

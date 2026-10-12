@@ -161,6 +161,7 @@ import {
   withForkSchemaPrompt,
 } from "./fork/schema.js";
 import { withForkProgressArgs } from "./fork/progress.js";
+import { WorkingLine } from "./fork/working.js";
 import { buildForkAttachCommand, forkAttachTmuxSession, validateForkAttach } from "./fork/attach.js";
 import { beginForkTmuxClaim, claimForkTmuxSession, planForkTmuxSession, recordForkTmuxSession } from "./fork/sessions.js";
 
@@ -3106,6 +3107,18 @@ function newTranscriptFinder(agent: AgentName, workDir: string, env: Env, prompt
   });
 }
 
+/**
+ * The transcript a resumed session goes on writing, and its size at launch:
+ * what is written past it is this run's. A finder of new transcripts never
+ * finds it, since it was there before the run started.
+ */
+function resumedTranscript(
+  agent: AgentName, nativeId: string | undefined, workDir: string, env: Env,
+): { path: string; from: number } | undefined {
+  const transcript = resolveNativeTranscript(agent, nativeId, workDir, env);
+  return transcript?.kind === "jsonl" ? { path: transcript.path, from: transcript.endOffset ?? 0 } : undefined;
+}
+
 function claimTranscriptOptions(agent: AgentName): Parameters<typeof resolveLatestNativeTranscripts>[5] {
   return agent === "antigravity" ? { antigravityScope: "all" } : {};
 }
@@ -4702,12 +4715,20 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
       : undefined;
     // Progress replaces the spinner: both say the agent is working, and the
     // spinner redrawing its line would tear the lines progress writes.
-    const progress = parsed.progress ? new ProgressRenderer(parsed.agent, stderr, cwd ?? process.cwd()) : undefined;
+    const working = parsed.progress && stderrIsTTY ? new WorkingLine(stderr) : undefined;
+    const progressWrite = working?.write ?? stderr;
+    const progress = parsed.progress ? new ProgressRenderer(parsed.agent, progressWrite, cwd ?? process.cwd()) : undefined;
     // Antigravity prints only its reply; what it does is in its transcript.
-    const transcriptProgress = progress && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal
+    const followed = progress && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal;
+    const resumed = followed && sessionPlan?.mode === "resume"
+      ? resumedTranscript(parsed.agent, sessionPlan.nativeId, cwd ?? process.cwd(), env)
+      : undefined;
+    const transcriptProgress = followed
       ? new TranscriptFollower(
-        newTranscriptFinder(parsed.agent, cwd ?? process.cwd(), env, composedPrompt),
-        new ProgressRenderer(parsed.agent, stderr, cwd ?? process.cwd()),
+        resumed ? () => resumed.path : newTranscriptFinder(parsed.agent, cwd ?? process.cwd(), env, composedPrompt),
+        new ProgressRenderer(parsed.agent, progressWrite, cwd ?? process.cwd()),
+        undefined,
+        resumed?.from,
       )
       : undefined;
     const waitingSpinner =
@@ -4719,11 +4740,12 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         : undefined;
     const displayStderr = (text: string) => {
       waitingSpinner?.clear();
-      stderr(text);
+      progressWrite(text);
     };
     statusReporter?.start();
     waitingSpinner?.start();
     transcriptProgress?.start();
+    working?.start();
     let result: ExecuteResult | undefined;
     let billingResult: BillingRunResult | undefined;
     const piCompletion = parsed.agent === "pi" ? new PiCompletionObserver() : undefined;
@@ -4860,6 +4882,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         piCompletion?.end();
         progress?.flush();
         transcriptProgress?.stop();
+        working?.stop();
         waitingSpinner?.stop();
         antigravityUsageTrace = antigravityUsageCapture?.read() ?? "";
         antigravityUsageCapture?.cleanup();

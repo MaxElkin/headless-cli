@@ -145,6 +145,7 @@ const ocPatch = {
 };
 const ocNew = { type: "tool_use", part: { type: "tool", tool: "something_new", state: { status: "completed", input: { description: "Did a thing" } } } };
 const ocThinking = { type: "reasoning", part: { type: "reasoning", text: "Reading it." } };
+const ocHidden = { type: "reasoning", part: { type: "reasoning", text: "", time: { start: 1000, end: 22600 } } };
 const ocText = { type: "text", part: { type: "text", text: "It says A." } };
 const ocError = { type: "error", error: { name: "APIError", data: { message: "rate limited" } } };
 
@@ -158,6 +159,7 @@ test("OpenCode parts become tool calls, failures, thinking, the reply and errors
   assert.deepEqual(traceEvents("opencode", ocPatch), [{ kind: "tool", name: "Edit", summary: "/work/a.md, /work/c.md" }]);
   assert.deepEqual(traceEvents("opencode", ocNew), [{ kind: "tool", name: "something_new", summary: "Did a thing" }]);
   assert.deepEqual(traceEvents("opencode", ocThinking), [{ kind: "thinking", text: "Reading it." }]);
+  assert.deepEqual(traceEvents("opencode", ocHidden), [{ kind: "hidden_thinking", seconds: 22 }]);
   assert.deepEqual(traceEvents("opencode", ocText), [{ kind: "message", text: "It says A." }]);
   assert.deepEqual(traceEvents("opencode", ocError), [{ kind: "error", text: "rate limited" }]);
 });
@@ -187,6 +189,25 @@ test("A transcript is followed from when it appears, as it grows", async () => {
   }
 });
 
+test("A resumed transcript is followed from where it stood, its history left out", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "headless-follow-test-"));
+  try {
+    const path = join(dir, "transcript.jsonl");
+    const history = `${JSON.stringify(agyInput)}\n${JSON.stringify(agyCalls)}\n`;
+    await writeFile(path, history);
+    const out: string[] = [];
+    const follower = new TranscriptFollower(() => path, new ProgressRenderer("antigravity", (text) => out.push(text), "/work"),
+      undefined, Buffer.byteLength(history));
+    follower.poll();
+    assert.deepEqual(out, []);
+    await appendFile(path, `${JSON.stringify(agyReply)}\n`);
+    follower.stop();
+    assert.deepEqual(out, ["\n💬 It says A.\n\n"]);
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("A harness with no known trace, or a record of another harness, yields nothing", () => {
   assert.deepEqual(traceEvents("gemini", claudeText), []);
   assert.deepEqual(traceEvents("antigravity", claudeText), []);
@@ -200,6 +221,15 @@ test("Codex's login-shell wrapper is taken off the command", () => {
   assert.equal(unwrapShellCommand("/bin/bash -lc 'ls -la'"), "ls -la");
   assert.equal(unwrapShellCommand(`/bin/zsh -lc "node -p \\"require('./p.json').name\\""`), `node -p "require('./p.json').name"`);
   assert.equal(unwrapShellCommand("git status"), "git status");
+});
+
+test("Withheld thinking is shown as one line with how long it took", () => {
+  const out: string[] = [];
+  const renderer = new ProgressRenderer("opencode", (text) => out.push(text));
+  renderer.feed(`${JSON.stringify(ocHidden)}\n`);
+  renderer.feed(`${JSON.stringify(ocBash)}\n`);
+  renderer.flush();
+  assert.equal(out.join(""), "💭 (thought for 22s)\n🔧 Bash(ls)\n");
 });
 
 test("A message followed by more work is a thought, and thoughts share their blank lines", () => {
@@ -289,7 +319,11 @@ test("CLI --progress shows the run on stderr and leaves stdout the final message
 
     assert.equal(code, 0, stderr.join(""));
     assert.equal(stdout.join(""), "Done.\n");
-    const shown = stderr.join("");
+    const raw = stderr.join("");
+    // The working line is drawn on a terminal and cleared at the end.
+    assert.match(raw, /⏳ Working… 0s/);
+    assert.ok(raw.endsWith("\r\u001b[2K"));
+    const shown = raw.replace(/\r\u001b\[2K(⏳ Working… \S+)?/g, "");
     assert.match(shown, /🔧 Bash\(sed -n '1,9p' \/work\/a\.md\)\n/);
     assert.match(shown, /\n💭 Checking the repository\.\n\n/);
     // A message with more work after it is what the agent is about to do, a

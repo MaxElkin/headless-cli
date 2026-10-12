@@ -16,6 +16,7 @@ import type { AgentName } from "./types.js";
 export type TraceEvent =
   | { kind: "message"; text: string }
   | { kind: "thinking"; text: string }
+  | { kind: "hidden_thinking"; seconds: number }
   | { kind: "tool"; name: string; summary: string }
   | { kind: "tool_result"; ok: false; detail: string }
   | { kind: "error"; text: string };
@@ -278,7 +279,14 @@ function opencodeEvents(value: JsonRecord): TraceEvent[] {
   }
   if (type === "reasoning") {
     const text = asString(part.text);
-    return text.trim() ? [{ kind: "thinking", text }] : [];
+    if (text.trim()) return [{ kind: "thinking", text }];
+    // Withheld, as an OpenAI model's encrypted reasoning is: its time still
+    // says the agent is thinking rather than hanging.
+    const time = asRecord(part.time);
+    const start = time.start, end = time.end;
+    return typeof start === "number" && typeof end === "number"
+      ? [{ kind: "hidden_thinking", seconds: Math.round((end - start) / 1000) }]
+      : [];
   }
   if (type === "tool_use") {
     const tool = asString(part.tool) || "tool";
@@ -368,6 +376,8 @@ export function renderTraceEvent(event: TraceEvent, workDir?: string): string | 
       return `  ⎿ failed${event.detail ? `: ${clipped(relative(event.detail, workDir))}` : ""}\n`;
     case "error":
       return `✗ ${clipped(event.text)}\n`;
+    case "hidden_thinking":
+      return `💭 (thought for ${event.seconds}s)\n`;
     case "thinking": {
       const [head, ...rest] = thoughtLines(event.text);
       if (head === undefined) return undefined;
@@ -484,7 +494,7 @@ export class ProgressRenderer {
  */
 export class TranscriptFollower {
   private path: string | undefined;
-  private offset = 0;
+  private offset: number;
   // A read can end inside a character; the decoder holds its first bytes.
   private readonly decoder = new StringDecoder("utf8");
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -493,7 +503,11 @@ export class TranscriptFollower {
     private readonly find: () => string | undefined,
     private readonly renderer: ProgressRenderer,
     private readonly intervalMs = 500,
-  ) {}
+    /** Where this run's part of the transcript starts: past a resumed session's history. */
+    from = 0,
+  ) {
+    this.offset = from;
+  }
 
   start(): void {
     this.timer = setInterval(() => this.poll(), this.intervalMs);
