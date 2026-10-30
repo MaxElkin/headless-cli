@@ -65,14 +65,14 @@ test("--clean-before and --clean-after require --session and reject --docker", a
   });
 });
 
-test("--clean-before starts a new conversation, and refuses while the tmux session runs", async () => {
+test("--clean-before starts a new conversation, closing the tmux session when it runs", async () => {
   await withTmux(async (env, launches, dir) => {
     writeStoredSession(env, { agent: "claude", alias: "demo", nativeId: oldId });
 
-    const live = await run(["claude", "--tmux", "--session", "demo", "--clean-before", "--prompt", "hi"], { ...env, TMUX_LIVE: "1" });
-    assert.equal(live.code, 2);
-    assert.match(live.stderr, /headless-claude-demo is running; exit it first/);
-    assert.equal(readStoredSession(env, "claude", "demo")?.nativeId, oldId);
+    applyForkClean("claude", { forkCleanBefore: true, sessionAlias: "demo" }, { ...env, TMUX_LIVE: "1" });
+    assert.match(readFileSync(env.TMUX_LOG ?? "", "utf8"), /^kill-session -t headless-claude-demo$/m);
+    assert.equal(readStoredSession(env, "claude", "demo")?.nativeId, undefined);
+    writeStoredSession(env, { agent: "claude", alias: "demo", nativeId: oldId });
 
     const result = await run(["claude", "--tmux", "--session", "demo", "--clean-before", "--prompt", "hi", "--work-dir", dir], env);
     assert.equal(result.code, 0, result.stderr);

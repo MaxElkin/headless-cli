@@ -13,6 +13,9 @@ Fork of [RobertTLange/headless-cli](https://github.com/RobertTLange/headless-cli
 | [Clean sessions](#clean-sessions) | `--clean-before` and `--clean-after`, which let one session name start a new conversation |
 | [Structured output](#structured-output) | `--json-schema`, which holds the agent's reply to a JSON Schema |
 | [Visible thinking](#visible-thinking) | `--progress` shows the agent's thinking with 💭 and its reply with 💬, and asks Codex for its thinking |
+| [Progress file](#progress-file) | `--progress-file <path>` appends the run's events, timed and uncut, as JSON lines, and edit events list their `paths` |
+
+What it doesn't do yet is in [headless-fork-backlog.md](headless-fork-backlog.md).
 
 ## Where fork code goes
 
@@ -150,11 +153,12 @@ It keeps the rest of the entry (Codex profile, work dir), and the next launch un
 conversation. The conversation itself is not deleted and can still be reached with the agent's own
 resume picker.
 
-An id is only ever forgotten while the name's tmux session (`headless-<agent>-<name>`) is not running:
+An id is only ever forgotten while the name's tmux session (`headless-<agent>-<name>`) is not running;
+`--clean-before` closes a running one first:
 
 | Flag | Tmux session running | Tmux session stopped, or one-shot |
 | --- | --- | --- |
-| `--clean-before` | refused: "exit it first" | forgets the id, then launches a new conversation |
+| `--clean-before` | closes it, forgets the id, then launches a new conversation | forgets the id, then launches a new conversation |
 | `--clean-after` | runs the task; the name stays marked | runs the task in the stored conversation; the name stays marked |
 | none, name marked | runs the task in the live session | forgets the id and clears the mark, then launches a new conversation |
 
@@ -268,3 +272,44 @@ Upstream edits:
   stderr write through, started and stopped beside the transcript follower.
 
 Tests: `fork-progress`, `fork-working`, and the thinking cases in `trace-events`.
+
+## Progress file
+
+`--progress` writes for a person, on stderr: a tool call's subject cut to one line, nothing timed, and
+gone once the terminal scrolls past it. What watches or audits a run from outside would otherwise
+read each harness's own session store, one format per harness. `--progress-file <path>` appends the
+events `traceEvents` yields to a file instead, for every harness `--progress` renders, with or
+without `--progress`. The caller gives one file per run, so it knows the run from the file.
+
+- **JSON Lines**, one event a line, each written whole with one append, so a reader following the
+  file mid-run only ever sees whole lines.
+- **Each line** is the event as `data.events` has it under `--sdk-format ndjson`, plus `time`, ISO
+  8601 in UTC. Nothing is cut, and paths stay as the harness gave them, not made relative to the
+  work directory. Messages are written as they come: the file does not hold one back to tell what
+  the agent says on the way from its reply, as `--progress` does; the last message is the reply.
+- **A first line** `{"kind":"start","agent","model","session","workDir"}`, `session` only with
+  `--session`, and **a last line** `{"kind":"end","exitCode"}`, written once the harness has exited,
+  so a reader knows which harness ran, and whether the run ended or died partway, without its caller.
+- **Appended, never truncated.** A second run given the same path adds its own `start` line, so a
+  caller running one step several times can keep them in one file.
+- **`paths`** on a `tool` event that edits files lists them, since `summary` joins them with `, `,
+  which a path holding a comma makes ambiguous. It is in `data.events` too, the one change outside
+  the file, and `--progress` lists the files from it.
+- **Codex's thinking** is asked for as with `--progress`.
+- **Not with `--tmux` or `--attach`**, which capture no trace; with `--json`, `--debug` or
+  `--sdk-format` it works as without them.
+
+A file that cannot be written costs the file, never the run: the first failure is reported once on
+stderr and the rest of the run writes nothing more to it.
+
+Upstream edits:
+
+- `src/cli.ts`: `ParsedArgs.progressFile`, its case in `parseArgs`, one help line, the `--tmux`
+  refusal beside `--progress`'s; in the one-shot path, the `ProgressFile` (`src/fork/progress-file.ts`)
+  started with the run, fed beside the renderer, and ended with the harness's exit code; the
+  Antigravity transcript follower started for it as for `--progress`; and `withForkProgressArgs`
+  given either flag.
+- `src/trace-events.ts`: `paths` on the `tool` event and where each harness's edits set it; the
+  renderer's edit case reading it; `TranscriptFollower` taking any `feed`/`flush` sink.
+
+Tests: `fork-progress-file`, and the `paths` cases in `trace-events`.

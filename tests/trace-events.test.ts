@@ -93,7 +93,7 @@ test("Codex items are told when a command starts, and again only if it failed", 
   assert.deepEqual(traceEvents("codex", codexCompletedOk), []);
   assert.deepEqual(traceEvents("codex", codexCompletedFailed), [{ kind: "tool_result", ok: false, detail: "exit 1: boom" }]);
   assert.deepEqual(traceEvents("codex", codexMessage), [{ kind: "message", text: "Reading the onboarding first." }]);
-  assert.deepEqual(traceEvents("codex", codexFileChange), [{ kind: "tool", name: "Edit", summary: "/work/a.md, /work/b.md" }]);
+  assert.deepEqual(traceEvents("codex", codexFileChange), [{ kind: "tool", name: "Edit", summary: "/work/a.md, /work/b.md", paths: ["/work/a.md", "/work/b.md"] }]);
   assert.deepEqual(traceEvents("codex", { type: "turn.failed", error: { message: "quota" } }), [{ kind: "error", text: "quota" }]);
   for (const record of codexNoise) assert.deepEqual(traceEvents("codex", record), [], JSON.stringify(record));
 });
@@ -156,7 +156,7 @@ test("OpenCode parts become tool calls, failures, thinking, the reply and errors
     { kind: "tool", name: "Read", summary: "/work/b.md" },
     { kind: "tool_result", ok: false, detail: "File not found: /work/b.md" },
   ]);
-  assert.deepEqual(traceEvents("opencode", ocPatch), [{ kind: "tool", name: "Edit", summary: "/work/a.md, /work/c.md" }]);
+  assert.deepEqual(traceEvents("opencode", ocPatch), [{ kind: "tool", name: "Edit", summary: "/work/a.md, /work/c.md", paths: ["/work/a.md", "/work/c.md"] }]);
   assert.deepEqual(traceEvents("opencode", ocNew), [{ kind: "tool", name: "something_new", summary: "Did a thing" }]);
   assert.deepEqual(traceEvents("opencode", ocThinking), [{ kind: "thinking", text: "Reading it." }]);
   assert.deepEqual(traceEvents("opencode", ocHidden), [{ kind: "hidden_thinking", seconds: 22 }]);
@@ -275,6 +275,30 @@ test("Events render as one line per call and the message whole, paths made relat
   const command = `cat /work/${"x".repeat(400)}.md`;
   assert.equal(renderTraceEvent({ kind: "tool", name: "Bash", summary: command }, work), `🔧 Bash(cat ${"x".repeat(400)}.md)\n`);
   assert.equal(renderTraceEvent({ kind: "tool", name: "Bash", summary: "a &&\nb" }), "🔧 Bash(a &&\n  b)\n");
+  // Nor are the files an edit touches, one per line.
+  const deep = `src/${"d/".repeat(100)}File.kt`;
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Edit", summary: `/work/${deep}, /work/b.md` }, work),
+    `📝 Edit(${deep}\n  b.md)\n`);
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Write", summary: `/work/${deep}` }, work), `📝 Write(${deep})\n`);
+  // Listed in `paths`, a path holding a comma stays one.
+  assert.equal(renderTraceEvent({ kind: "tool", name: "Edit", summary: "/work/a, b.kt", paths: ["/work/a, b.kt"] }, work),
+    "📝 Edit(a, b.kt)\n");
+});
+
+test("an edit lists its files in paths, whichever harness made it", () => {
+  assert.deepEqual(traceEvents("claude", { type: "assistant", message: { content: [
+    { type: "tool_use", name: "Edit", input: { file_path: "/work/a.kt" } },
+    { type: "tool_use", name: "Bash", input: { command: "ls" } },
+  ] } }), [
+    { kind: "tool", name: "Edit", summary: "/work/a.kt", paths: ["/work/a.kt"] },
+    { kind: "tool", name: "Bash", summary: "ls" },
+  ]);
+  assert.deepEqual(traceEvents("codex", { type: "item.completed", item: { type: "file_change",
+    changes: [{ path: "/work/a.kt" }, { path: "/work/b.md" }] } }),
+  [{ kind: "tool", name: "Edit", summary: "/work/a.kt, /work/b.md", paths: ["/work/a.kt", "/work/b.md"] }]);
+  assert.deepEqual(traceEvents("opencode", { type: "tool_use", part: { tool: "write",
+    state: { status: "completed", input: { filePath: "/work/c.md" } } } }),
+  [{ kind: "tool", name: "Write", summary: "/work/c.md", paths: ["/work/c.md"] }]);
 });
 
 test("The renderer waits for a record split across chunks, and leaves lines that are not JSON alone", () => {

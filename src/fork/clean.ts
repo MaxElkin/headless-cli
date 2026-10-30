@@ -5,7 +5,7 @@
 // conversation. The conversation itself is not deleted. An id is only ever forgotten while the
 // name's tmux session is not running:
 //
-// - `--clean-before` forgets the id before the launch, and refuses while the tmux session runs.
+// - `--clean-before` closes the tmux session when it runs, then forgets the id before the launch.
 // - `--clean-after` marks the name; the first launch that finds the tmux session stopped forgets
 //   the id. This covers every way a session ends (exit, detach then exit, crash, reboot) without
 //   watching it, and for a one-shot run the next launch is always after it.
@@ -48,9 +48,7 @@ export function applyForkClean(agent: AgentName, options: ForkCleanOptions, env:
   if (!pending && !options.forkCleanBefore && !options.forkCleanAfter) return;
 
   const running = pending || options.forkCleanBefore ? tmuxSessionRunning(agent, alias, env) : false;
-  if (options.forkCleanBefore && running) {
-    throw new Error(`--clean-before: tmux session headless-${agent}-${alias} is running; exit it first`);
-  }
+  if (options.forkCleanBefore && running) killTmuxSession(agent, alias, env);
   if ((pending && !running) || options.forkCleanBefore) {
     forgetStoredSession(env, agent, alias);
     delete marks.cleanAfter[key];
@@ -71,6 +69,15 @@ function tmuxSessionRunning(agent: AgentName, alias: string, env: Env): boolean 
     timeout: 5000,
   });
   return result.status === 0;
+}
+
+function killTmuxSession(agent: AgentName, alias: string, env: Env): void {
+  const result = spawnSync("tmux", ["kill-session", "-t", `headless-${agent}-${alias}`], {
+    env: env as NodeJS.ProcessEnv,
+    stdio: "ignore",
+    timeout: 5000,
+  });
+  if (result.status !== 0) throw new Error(`--clean-before: could not close tmux session headless-${agent}-${alias}`);
 }
 
 // Removes the conversation id from upstream's session store and keeps the rest of the entry (the

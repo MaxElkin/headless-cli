@@ -17,7 +17,8 @@ export type TraceEvent =
   | { kind: "message"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "hidden_thinking"; seconds: number }
-  | { kind: "tool"; name: string; summary: string }
+  // `paths`: the files a call that edits touches, which `summary` joins with `, `.
+  | { kind: "tool"; name: string; summary: string; paths?: string[] }
   | { kind: "tool_result"; ok: false; detail: string }
   | { kind: "error"; text: string };
 
@@ -121,7 +122,7 @@ function codexItemEvents(phase: "started" | "completed", item: JsonRecord): Trac
     if (phase !== "completed") return [];
     const changes = Array.isArray(item.changes) ? item.changes : [];
     const paths = changes.map((change) => asString(asRecord(change).path)).filter(Boolean);
-    return [{ kind: "tool", name: "Edit", summary: paths.join(", ") }];
+    return [{ kind: "tool", name: "Edit", summary: paths.join(", "), paths }];
   }
   if (type === "mcp_tool_call") {
     if (phase !== "started") return [];
@@ -259,9 +260,8 @@ const opencodeToolNames: Record<string, string> = {
 };
 
 /** The files a patch touches, which say more than its `*** Begin Patch` first line. */
-function patchedFiles(patch: string): string {
-  const files = [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((match) => match[1]!.trim());
-  return files.join(", ");
+function patchedFiles(patch: string): string[] {
+  return [...patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((match) => match[1]!.trim());
 }
 
 /**
@@ -292,8 +292,10 @@ function opencodeEvents(value: JsonRecord): TraceEvent[] {
     const tool = asString(part.tool) || "tool";
     const state = asRecord(part.state);
     const input = asRecord(state.input);
-    const summary = patchedFiles(asString(input.patchText)) || asString(input.filePath) || toolSubject(input);
-    const events: TraceEvent[] = [{ kind: "tool", name: opencodeToolNames[tool] ?? tool, summary }];
+    const patched = patchedFiles(asString(input.patchText));
+    const summary = patched.join(", ") || asString(input.filePath) || toolSubject(input);
+    const events: TraceEvent[] = [{ kind: "tool", name: opencodeToolNames[tool] ?? tool, summary,
+      ...(patched.length > 0 ? { paths: patched } : {}) }];
     if (asString(state.status) === "error") {
       events.push({ kind: "tool_result", ok: false, detail: firstLine(asString(state.error)) });
     }
@@ -309,6 +311,10 @@ function opencodeEvents(value: JsonRecord): TraceEvent[] {
 
 /** The events one native trace record holds, for the harnesses whose trace is known. */
 export function traceEvents(agent: AgentName, value: unknown): TraceEvent[] {
+  return withEditPaths(harnessEvents(agent, value));
+}
+
+function harnessEvents(agent: AgentName, value: unknown): TraceEvent[] {
   const record = asRecord(value);
   if (Object.keys(record).length === 0) return [];
   if (agent === "claude") return claudeEvents(record);
@@ -316,6 +322,13 @@ export function traceEvents(agent: AgentName, value: unknown): TraceEvent[] {
   if (agent === "antigravity") return antigravityEvents(record);
   if (agent === "opencode") return opencodeEvents(record);
   return [];
+}
+
+/** An edit of one file, whose subject is its path, lists it in `paths` as an edit of several does. */
+function withEditPaths(events: TraceEvent[]): TraceEvent[] {
+  return events.map((event) => event.kind === "tool" && !event.paths && toolMark(event.name) === "📝" && event.summary.trim()
+    ? { ...event, paths: [event.summary.trim()] }
+    : event);
 }
 
 const maxSummaryChars = 160;
@@ -366,10 +379,15 @@ export function renderTraceEvent(event: TraceEvent, workDir?: string): string | 
     }
     case "tool": {
       // A command is shown whole: cut short, the part that says what it does
-      // is often the part lost, after a long `cd` or a list of files.
+      // is often the part lost, after a long `cd` or a list of files. So are
+      // the files an edit touches, one per line: a deep path is cut before
+      // its file name, and the files after the first are lost altogether.
       const subject = event.name === "Bash"
         ? relative(event.summary, workDir).trim().split(/\r?\n/).join("\n  ")
-        : clipped(relative(event.summary, workDir));
+        : toolMark(event.name) === "📝"
+          ? (event.paths ?? event.summary.split(/, |\r?\n/)).map((path) => relative(path, workDir).trim())
+            .filter(Boolean).join("\n  ")
+          : clipped(relative(event.summary, workDir));
       return `${toolMark(event.name)} ${event.name}${subject ? `(${subject})` : ""}\n`;
     }
     case "tool_result":
@@ -501,7 +519,7 @@ export class TranscriptFollower {
 
   constructor(
     private readonly find: () => string | undefined,
-    private readonly renderer: ProgressRenderer,
+    private readonly renderer: { feed(chunk: string): void; flush(): void },
     private readonly intervalMs = 500,
     /** Where this run's part of the transcript starts: past a resumed session's history. */
     from = 0,

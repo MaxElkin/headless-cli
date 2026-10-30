@@ -6157,6 +6157,63 @@ test("CLI --tmux sends Enter after launching opencode prompt", async () => {
   }
 });
 
+test("CLI --tmux pastes the opencode prompt once its input box shows", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "headless-test-"));
+  try {
+    const binDir = join(dir, "bin");
+    const captureFile = join(dir, "tmux.jsonl");
+    await import("node:fs/promises").then(async ({ chmod, mkdir, writeFile }) => {
+      await mkdir(binDir);
+      const tmux = join(binDir, "tmux");
+      // The pane shows the input box from the second look on.
+      await writeFile(
+        tmux,
+        [
+          "#!/usr/bin/env node",
+          "const fs = require('node:fs');",
+          "const args = process.argv.slice(2);",
+          "fs.appendFileSync(process.env.HEADLESS_TMUX_CAPTURE, JSON.stringify(args) + '\\n');",
+          "if (args[0] === 'capture-pane') {",
+          "  const looks = fs.readFileSync(process.env.HEADLESS_TMUX_CAPTURE, 'utf8').split('capture-pane').length - 1;",
+          "  process.stdout.write(looks > 1 ? 'Ask anything' : 'loading');",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      await chmod(tmux, 0o755);
+    });
+
+    const started = Date.now();
+    const code = await runCli(["opencode", "--prompt", "hello world", "--model", "openai/oc-model", "--work-dir", dir, "--tmux"], {
+      env: {
+        ...process.env,
+        HOME: dir,
+        HEADLESS_TMUX_CAPTURE: captureFile,
+        HEADLESS_TMUX_OPENCODE_WAKE_DELAY_MS: "20000",
+        HEADLESS_TMUX_OPENCODE_PASTE_DELAY_MS: "0",
+        HEADLESS_TMUX_OPENCODE_SUBMIT_DELAY_MS: "0",
+        PATH: `${binDir}:${process.env.PATH ?? ""}`,
+      },
+      stdout: () => undefined,
+    });
+
+    const calls = readFileSync(captureFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const sessionName = calls[0][3];
+    assert.equal(code, 0);
+    assert.deepEqual(calls.slice(1), [
+      ["capture-pane", "-p", "-t", sessionName],
+      ["capture-pane", "-p", "-t", sessionName],
+      ["send-keys", "-t", sessionName, "Space", "BSpace"],
+      ["set-buffer", "-b", `${sessionName}-prompt`, "hello world"],
+      ["paste-buffer", "-p", "-d", "-b", `${sessionName}-prompt`, "-t", sessionName],
+      ["send-keys", "-t", sessionName, "Enter"],
+    ]);
+    assert.ok(Date.now() - started < 10_000);
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+});
+
 test("CLI --tmux sends Enter after launching Antigravity prompt", async () => {
   const dir = mkdtempSync(join(tmpdir(), "headless-test-"));
   try {

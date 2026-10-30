@@ -161,6 +161,7 @@ import {
   withForkSchemaPrompt,
 } from "./fork/schema.js";
 import { withForkProgressArgs } from "./fork/progress.js";
+import { ProgressFile } from "./fork/progress-file.js";
 import { WorkingLine } from "./fork/working.js";
 import { buildForkAttachCommand, forkAttachTmuxSession, validateForkAttach } from "./fork/attach.js";
 import { beginForkTmuxClaim, claimForkTmuxSession, planForkTmuxSession, recordForkTmuxSession } from "./fork/sessions.js";
@@ -234,6 +235,7 @@ interface ParsedArgs {
   sdkFormat?: SdkFormat;
   debug: boolean;
   progress: boolean;
+  progressFile?: string;
   usage: boolean;
   wait: boolean;
   delete: boolean;
@@ -350,6 +352,7 @@ function usage(): string {
     "  --sdk-format <fmt>   Versioned SDK output: json or ndjson.",
     "  --debug              Stream raw trace and print extracted final message.",
     "  --progress           Show what the agent says and which tools it calls on stderr as it works.",
+    "  --progress-file <path> Append the same events, timed and uncut, to a JSON Lines file.",
     "  --usage              Append normalized token and API-equivalent cost JSON.",
     "  --tmux               Launch an interactive agent in a tmux session.",
     "  --attach             Like --tmux, then attach this terminal to the new session.",
@@ -357,7 +360,7 @@ function usage(): string {
     "  --delete             With --tmux --wait, kill the tmux session after completion.",
     "  --name <name>        Use a managed tmux session name with --tmux.",
     "  --session <name>     Start or resume a named Headless session.",
-    "  --clean-before       With --session, start a new conversation (refused while its tmux session runs).",
+    "  --clean-before       With --session, start a new conversation, closing its tmux session if it runs.",
     "  --clean-after        With --session, start a new conversation on the first launch after this one stops.",
     "  --json-schema <s>    JSON Schema, or a path to one, the final reply must match. Given to the harness's own flag where it has one (claude, codex, antigravity), asked for in the prompt otherwise.",
     "  attach [session]     Attach to one or all active headless tmux sessions.",
@@ -619,6 +622,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--progress":
         parsed.progress = true;
+        break;
+      case "--progress-file":
+        parsed.progressFile = takeValue(args, arg);
         break;
       case "--usage":
         parsed.usage = true;
@@ -1277,7 +1283,15 @@ interface TmuxAttachAllCommands {
 interface TmuxPostLaunchCommand {
   command: BuiltCommand;
   delayMs: number;
+  // When set, `delayMs` is the longest wait: the pane is polled and the command
+  // runs as soon as it shows this, so a slow start does not lose the prompt.
+  readyPattern?: RegExp;
 }
+
+// What an agent's TUI shows once its input box takes text.
+const TMUX_READY_PATTERNS: Partial<Record<AgentName, RegExp>> = {
+  opencode: /Ask anything/,
+};
 
 // How the wait loop locates this run's transcript. Every tier resolves a single
 // transcript without reading the injected marker, except the explicit "marker"
@@ -2228,9 +2242,10 @@ function tmuxPromptInput(
   if (!pastePrompt || (agent !== "opencode" && agent !== "antigravity")) return [];
 
   const envPrefix = agent === "opencode" ? "OPENCODE" : "ANTIGRAVITY";
+  const readyPattern = TMUX_READY_PATTERNS[agent];
   const wakeDelayMs = parseDelayMs(
     env[`HEADLESS_TMUX_${envPrefix}_WAKE_DELAY_MS`] ?? env[`HEADLESS_TMUX_${envPrefix}_ENTER_DELAY_MS`],
-    4000,
+    readyPattern ? 30_000 : 4000,
   );
   const pasteDelayMs = parseDelayMs(env[`HEADLESS_TMUX_${envPrefix}_PASTE_DELAY_MS`], 1000);
   const submitDelayMs = parseDelayMs(env[`HEADLESS_TMUX_${envPrefix}_SUBMIT_DELAY_MS`], 1000);
@@ -2240,6 +2255,7 @@ function tmuxPromptInput(
     {
       command: { command: "tmux", args: ["send-keys", "-t", sessionName, "Space", "BSpace"] },
       delayMs: wakeDelayMs,
+      readyPattern,
     },
     {
       command: { command: "tmux", args: ["set-buffer", "-b", promptBuffer, prompt] },
@@ -2761,6 +2777,21 @@ async function waitForDelay(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Polls the pane until it shows `pattern`, for at most `timeoutMs`; on timeout
+// the caller goes on, as it did with a fixed delay.
+async function waitForTmuxPane(sessionName: string, pattern: RegExp, timeoutMs: number, env: Env): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const pane = spawnSync("tmux", ["capture-pane", "-p", "-t", sessionName], {
+      env: env as NodeJS.ProcessEnv,
+      encoding: "utf8",
+      timeout: 2000,
+    });
+    if (pane.status === 0 && pattern.test(pane.stdout)) return;
+    await waitForDelay(250);
+  }
+}
+
 async function executeTmuxCommands(
   commands: TmuxCommands,
   cwd: string | undefined,
@@ -2773,7 +2804,11 @@ async function executeTmuxCommands(
   }
 
   for (const postLaunch of commands.postLaunch) {
-    await waitForDelay(postLaunch.delayMs);
+    if (postLaunch.readyPattern) {
+      await waitForTmuxPane(commands.sessionName, postLaunch.readyPattern, postLaunch.delayMs, env);
+    } else {
+      await waitForDelay(postLaunch.delayMs);
+    }
     const code = await executeSimpleCommand(postLaunch.command, cwd, env, stderr);
     if (code !== 0) {
       return code;
@@ -4151,6 +4186,9 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     ] as const) {
       if (parsed.progress && given) throw new CliError(`--progress cannot be used with ${flag}`);
     }
+    if (parsed.progressFile !== undefined && (parsed.tmux || parsed.attach)) {
+      throw new CliError("--progress-file cannot be used with --tmux or --attach");
+    }
     if (parsed.tmuxName !== undefined && !parsed.tmux) {
       throw new CliError("--name can only be used with --tmux");
     }
@@ -4637,7 +4675,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
       let built = withForkProgressArgs(parsed.agent!, withForkSchemaArgs(parsed.agent!, withAgentArgs(
         withRunEnvironment(buildAgentCommand(parsed.agent!, options, attemptEnv), parsed.runId, nodeId),
         parsed,
-      ), forkSchema), parsed.progress);
+      ), forkSchema), parsed.progress || parsed.progressFile !== undefined);
       const masks = Object.fromEntries(Object.entries(attemptEnv).filter(([, value]) => value === undefined));
       if (Object.keys(masks).length) built = { ...built, env: { ...built.env, ...masks } };
       if (parsed.docker) {
@@ -4718,15 +4756,21 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     const working = parsed.progress && stderrIsTTY ? new WorkingLine(stderr) : undefined;
     const progressWrite = working?.write ?? stderr;
     const progress = parsed.progress ? new ProgressRenderer(parsed.agent, progressWrite, cwd ?? process.cwd()) : undefined;
+    const progressFile = parsed.progressFile === undefined ? undefined
+      : new ProgressFile(parsed.progressFile, parsed.agent, progressWrite);
     // Antigravity prints only its reply; what it does is in its transcript.
-    const followed = progress && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal;
+    const followed = (progress || progressFile) && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal;
     const resumed = followed && sessionPlan?.mode === "resume"
       ? resumedTranscript(parsed.agent, sessionPlan.nativeId, cwd ?? process.cwd(), env)
       : undefined;
+    const followedRenderer = new ProgressRenderer(parsed.agent, progressWrite, cwd ?? process.cwd());
     const transcriptProgress = followed
       ? new TranscriptFollower(
         resumed ? () => resumed.path : newTranscriptFinder(parsed.agent, cwd ?? process.cwd(), env, composedPrompt),
-        new ProgressRenderer(parsed.agent, progressWrite, cwd ?? process.cwd()),
+        progressFile ? {
+          feed: (chunk: string) => { if (progress) followedRenderer.feed(chunk); progressFile.feed(chunk); },
+          flush: () => { if (progress) followedRenderer.flush(); progressFile.flush(); },
+        } : followedRenderer,
         undefined,
         resumed?.from,
       )
@@ -4744,6 +4788,11 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     };
     statusReporter?.start();
     waitingSpinner?.start();
+    progressFile?.start({
+      model: usageContext(parsed.agent, configuredDefaults, env, effectiveProfile).model,
+      ...(parsed.sessionAlias === undefined ? {} : { session: parsed.sessionAlias }),
+      workDir: cwd ?? process.cwd(),
+    });
     transcriptProgress?.start();
     working?.start();
     let result: ExecuteResult | undefined;
@@ -4835,6 +4884,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
               (text) => {
                 piCompletion?.write(text);
                 progress?.feed(text);
+                progressFile?.feed(text);
                 attempt.observe(text);
                 if (stdoutHandling === "capture") commandStdoutLog?.(text);
               },
@@ -4866,6 +4916,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
               stdoutLog: (text) => {
                 piCompletion?.write(text);
                 progress?.feed(text);
+                progressFile?.feed(text);
                 attempt.observe(text);
                 commandStdoutLog?.(text);
               }, stderr: commandStderr,
@@ -4903,6 +4954,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           : undefined;
       const piFinalMessage = piOutcome?.status === "success" ? piOutcome.finalMessage : undefined;
       if (piError && result.code === 0) result = { ...result, code: 1 };
+      progressFile?.end(result.code);
       billingHomeCompleted = result.code === 0;
       const usageCommandTrace = result.stdout || result.usageTrace || result.finalMessageTrace || "";
       const usageTrace = antigravityUsageTrace

@@ -92,7 +92,7 @@ headless --prompt "identity" --print-command --json
 headless codex --prompt "Fix the failing tests" --debug
 ```
 
-`--progress` shows the run on stderr as it goes — its thinking set apart with `💭`, as is what it says on the way, its reply with `💬`, one line per tool call — `📖` reading or searching, `📝` editing, `🔧` anything else, a shell command included — and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams; OpenCode reports a tool call once it has finished. Antigravity prints no events, so for a local run its transcript under `brain/<conversation>/` is followed instead: for a resumed `--session`, its conversation's from where it stood at launch; otherwise the first one started after the run and asked its prompt. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
+`--progress` shows the run on stderr as it goes — its thinking set apart with `💭`, as is what it says on the way, its reply with `💬`, one line per tool call — `📖` reading or searching, `📝` editing, `🔧` anything else, a shell command included — and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole, and so are the files an edit touches, one per line; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams; OpenCode reports a tool call once it has finished. Antigravity prints no events, so for a local run its transcript under `brain/<conversation>/` is followed instead: for a resumed `--session`, its conversation's from where it stood at launch; otherwise the first one started after the run and asked its prompt. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
 
 ```bash
 headless codex --prompt "Fix the failing tests" --progress
@@ -111,7 +111,22 @@ headless codex --prompt "Fix the failing tests" --progress
 
 ```
 
-With `--sdk-format ndjson`, each `trace` envelope also carries `data.events`: the same events as `--progress` shows, in one shape for every agent whose trace is known (`message`, `thinking`, `tool`, `tool_result`, `error`), beside the native record in `data.value`. It is absent when a record holds nothing worth showing.
+With `--sdk-format ndjson`, each `trace` envelope also carries `data.events`: the same events as `--progress` shows, in one shape for every agent whose trace is known (`message`, `thinking`, `tool`, `tool_result`, `error`), beside the native record in `data.value`. It is absent when a record holds nothing worth showing. A `tool` event that edits files also lists them in `paths`, since `summary` joins them with `, `.
+
+`--progress-file <path>` appends the same events to a file, one JSON object a line, for whatever watches or audits the run from outside: each event as `data.events` has it, plus `time` (ISO 8601, UTC), nothing cut and paths as the harness gave them. The first line, `{"kind":"start","agent","model","session","workDir"}`, says what ran; the last, `{"kind":"end","exitCode"}`, that the run ended, so a file without it was cut short. Lines are written whole, one at a time, so a reader following the file never sees half of one. The file is appended to and never truncated: a second run given the same path adds its own `start` line after the first run's `end`. It works with or without `--progress`, and asks Codex for its thinking as `--progress` does. It cannot be combined with `--tmux` or `--attach`.
+
+```bash
+headless opencode --prompt "Fix the failing tests" --progress-file runs/fix.jsonl
+```
+
+```json
+{"time":"2026-10-19T14:02:11.482Z","kind":"start","agent":"opencode","model":"…","workDir":"/work"}
+{"time":"2026-10-19T14:02:30.117Z","kind":"tool","name":"Edit","summary":"/work/a.ts, /work/b.md","paths":["/work/a.ts","/work/b.md"]}
+{"time":"2026-10-19T14:03:05.660Z","kind":"tool","name":"Bash","summary":"npm test"}
+{"time":"2026-10-19T14:05:41.002Z","kind":"tool_result","ok":false,"detail":"exit 1: 2 failing"}
+{"time":"2026-10-19T14:06:10.331Z","kind":"message","text":"Fixed the tokenizer."}
+{"time":"2026-10-19T14:06:10.402Z","kind":"end","exitCode":0}
+```
 
 `--usage` appends normalized token usage and cost JSON for one-shot runs, including Docker and Modal runs. In the default output mode it follows the extracted final message. With `--json`, it follows the streamed native trace and does not require Headless to extract a final assistant message.
 
@@ -325,6 +340,7 @@ Options:
 - `--json`: stream the raw agent JSON trace instead of extracting the final message.
 - `--debug`: stream the raw agent JSON trace and append the extracted final message.
 - `--progress`: show what the agent says and which tools it calls on stderr as it works; stdout stays the final message.
+- `--progress-file <path>`: append the same events, timed and uncut, to a JSON Lines file.
 - `--usage`: append normalized token usage and cost JSON after the final message or streamed `--json` trace.
 - `--tmux`: launch an interactive agent in a detached tmux session with the prompt as its initial message.
 - `--wait`: with `--tmux`, wait for native transcript completion and print the final message.
