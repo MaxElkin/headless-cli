@@ -122,3 +122,41 @@ test("forgetting keeps the rest of the stored session", async () => {
     assert.equal(stored?.workDir, "/work");
   });
 });
+
+test("--forget-session clears only the stopped binding, without launching an agent", async () => {
+  await withTmux(async (env, launches) => {
+    writeStoredSession(env, { agent: "codex", alias: "demo", nativeId: oldId, profile: "work" });
+    writeStoredSession(env, { agent: "codex", alias: "other", nativeId: oldId });
+    applyForkClean("codex", { sessionAlias: "demo", forkCleanAfter: true }, env);
+    const command = ["codex", "--session", "demo", "--forget-session"];
+    assert.equal((await run([...command, "--print-command"], env)).code, 0);
+    assert.equal(readStoredSession(env, "codex", "demo")?.nativeId, oldId);
+    const forgotten = await run(command, env);
+    assert.equal(forgotten.code, 0, forgotten.stderr);
+    assert.equal(readStoredSession(env, "codex", "demo")?.nativeId, undefined);
+    assert.equal(readStoredSession(env, "codex", "demo")?.profile, "work");
+    assert.equal(readStoredSession(env, "codex", "other")?.nativeId, oldId);
+    assert.equal((await run(command, env)).code, 0);
+    assert.equal(launches().length, 0);
+    // Explicit cleanup consumes a pending deferred clean-after too.
+    writeStoredSession(env, { agent: "codex", alias: "demo", nativeId: oldId });
+    applyForkClean("codex", { sessionAlias: "demo" }, env);
+    assert.equal(readStoredSession(env, "codex", "demo")?.nativeId, oldId);
+  });
+});
+
+test("--forget-session refuses a live tmux session and invalid launch combinations", async () => {
+  await withTmux(async (env) => {
+    writeStoredSession(env, { agent: "codex", alias: "demo", nativeId: oldId });
+    const command = ["codex", "--session", "demo", "--forget-session"];
+    const live = await run(command, { ...env, TMUX_LIVE: "1" });
+    assert.notEqual(live.code, 0);
+    assert.match(live.stderr, /cannot forget running session/);
+    assert.equal(readStoredSession(env, "codex", "demo")?.nativeId, oldId);
+    assert.equal((await run(["codex", "--forget-session"], env)).code, 2);
+    for (const extra of [["--prompt", ""], ["--tmux"], ["--docker"], ["--modal"], ["--clean-before"], ["--clean-after"]]) {
+      const invalid = await run([...command, ...extra], env);
+      assert.equal(invalid.code, 2, JSON.stringify(extra));
+    }
+  });
+});

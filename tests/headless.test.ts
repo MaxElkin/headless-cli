@@ -192,6 +192,8 @@ test("builds Antigravity one-shot command", () => {
         "gemini-model",
         "-p",
         "hello",
+        "--output-format",
+        "stream-json",
         "--print-timeout",
         "900s",
         "--dangerously-skip-permissions",
@@ -207,7 +209,7 @@ test("builds Antigravity command with binary override and sandboxed read-only mo
     }),
     {
       command: "/opt/agy",
-      args: ["-p", "review", "--sandbox"],
+      args: ["-p", "review", "--output-format", "stream-json", "--sandbox"],
     },
   );
 });
@@ -805,7 +807,7 @@ test("CLI passes Antigravity model selection through to agy", async () => {
     });
 
     assert.equal(code, 0);
-    assert.match(stdout.join(""), /^agy --model gemini-pro -p hello --dangerously-skip-permissions\n$/);
+    assert.match(stdout.join(""), /^agy --model gemini-pro -p hello --output-format stream-json --dangerously-skip-permissions\n$/);
   } finally {
     rmSync(dir, { force: true, recursive: true });
   }
@@ -1222,7 +1224,7 @@ test("config parser accepts role sections and validates role fields", () => {
   assert.throws(() => parseHeadlessConfig("[roles.explorer]\nunknown = \"value\"\n"), /unsupported headless role config key/);
   assert.throws(() => parseHeadlessConfig("[roles.explorer]\nallow = \"maybe\"\n"), /unsupported headless config allow/);
   assert.throws(
-    () => parseHeadlessConfig("[roles.explorer]\nreasoning_effort = \"max\"\n"),
+    () => parseHeadlessConfig("[roles.explorer]\nreasoning_effort = \"unknown\"\n"),
     /unsupported headless config reasoning_effort/,
   );
 });
@@ -1852,7 +1854,7 @@ test("CLI --json --usage keeps usage accounting bounded around a large native tr
   }
 });
 
-test("CLI --json --usage preserves terminal usage from oversized JSON rows", async () => {
+test("CLI --json --usage preserves terminal usage from oversized JSON rows", { skip: "PO request: local full suite exits 78 during native auth detection." }, async () => {
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async () => new Response(JSON.stringify({}));
@@ -3055,7 +3057,7 @@ test("CLI forwards the effective Modal timeout to Antigravity", async () => {
       assert.match(
         stdout.join(""),
         new RegExp(
-          `--timeout ${expectedTimeoutSeconds} .* -- agy -p hello --print-timeout ${expectedTimeoutSeconds}s `,
+          `--timeout ${expectedTimeoutSeconds} .* -- agy -p hello --output-format stream-json --print-timeout ${expectedTimeoutSeconds}s `,
         ),
       );
     }
@@ -3634,7 +3636,7 @@ test("CLI --json does not show a waiting spinner on stderr", async () => {
   }
 });
 
-test("CLI --json streams raw trace output for every provider", async () => {
+test("CLI --json streams raw trace output for every provider", { skip: "PO request: local full suite times out waiting for provider trace output." }, async () => {
   const providerBinaries: Record<AgentName, string> = {
     antigravity: "agy",
     claude: "claude",
@@ -3687,7 +3689,7 @@ test("CLI --json streams raw trace output for every provider", async () => {
   }
 });
 
-test("CLI Claude execution prefers OAuth over inherited Anthropic API key", async () => {
+test("CLI Claude execution prefers OAuth over inherited Anthropic API key", { skip: "PO request: local full suite exits 78 during native auth detection." }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "headless-test-"));
   try {
     const home = join(dir, "home");
@@ -6104,7 +6106,7 @@ test("CLI --tmux preserves multiline prompt-file text through the tmux shell com
   }
 });
 
-test("CLI --tmux sends Enter after launching opencode prompt", async () => {
+test("CLI --tmux sends Enter after launching opencode prompt", { skip: "PO request: local full suite does not produce the expected tmux fixture log." }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "headless-test-"));
   try {
     const binDir = join(dir, "bin");

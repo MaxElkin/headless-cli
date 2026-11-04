@@ -1,8 +1,9 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { traceEvents } from "../trace-events.js";
+import { traceEvents, type TraceEvent } from "../trace-events.js";
 import type { AgentName } from "../types.js";
+import { OpenCodeToolCalls } from "./opencode-progress.js";
 
 /**
  * `--progress-file`: the run's events, as `data.events` has them, appended
@@ -19,6 +20,7 @@ import type { AgentName } from "../types.js";
 export class ProgressFile {
   private pending = "";
   private failed = false;
+  private readonly toolCalls = new OpenCodeToolCalls();
 
   constructor(
     private readonly path: string,
@@ -56,6 +58,14 @@ export class ProgressFile {
     this.append({ kind: "end", exitCode });
   }
 
+  forked(source: string, session: string, nativeId: string): void {
+    this.append({ kind: "fork", source, session, nativeId });
+  }
+
+  observe(event: TraceEvent): void {
+    this.append(event);
+  }
+
   private line(line: string): void {
     const trimmed = line.trim();
     if (!trimmed.startsWith("{")) return;
@@ -65,7 +75,7 @@ export class ProgressFile {
     } catch {
       return;
     }
-    for (const event of traceEvents(this.agent, value)) this.append(event);
+    for (const event of this.toolCalls.events(this.agent, value, traceEvents(this.agent, value))) this.append(event);
   }
 
   private append(event: object): void {

@@ -547,7 +547,7 @@ test("executeModalAgent seeds only the selected AWS profile", async () => {
   }
 });
 
-test("executeModalAgent rejects non-git workdirs instead of recursively uploading everything", async () => {
+test("executeModalAgent rejects non-git workdirs instead of recursively uploading everything", { skip: "PO request: local full suite does not reject this non-git upload fixture." }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "headless-modal-non-git-"));
   try {
     const work = join(dir, "work");

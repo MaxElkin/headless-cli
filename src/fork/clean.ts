@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 
 import { sessionStorePath } from "../sessions.js";
 import type { AgentName, Env } from "../types.js";
+import { withForkSessionStoreLock } from "./session-checkpoint.js";
 
 export interface ForkCleanOptions {
   forkCleanBefore?: boolean;
@@ -57,12 +58,26 @@ export function applyForkClean(agent: AgentName, options: ForkCleanOptions, env:
   if (pending !== (marks.cleanAfter[key] === true)) writeMarks(env, marks);
 }
 
+// Explicit control-plane cleanup: no agent invocation, prompt or provider request.
+export function forgetForkSession(agent: AgentName, alias: string, env: Env): void {
+  if (tmuxSessionRunning(agent, alias, env)) {
+    throw new Error(`cannot forget running session headless-${agent}-${alias}`);
+  }
+  forgetStoredSession(env, agent, alias);
+  const marks = readMarks(env);
+  const key = markKey(agent, alias);
+  if (marks.cleanAfter[key]) {
+    delete marks.cleanAfter[key];
+    writeMarks(env, marks);
+  }
+}
+
 function markKey(agent: AgentName, alias: string): string {
   return `${agent}/${alias}`;
 }
 
 // The session name upstream's buildHeadlessTmuxSessionName gives a --session alias.
-function tmuxSessionRunning(agent: AgentName, alias: string, env: Env): boolean {
+export function tmuxSessionRunning(agent: AgentName, alias: string, env: Env): boolean {
   const result = spawnSync("tmux", ["has-session", "-t", `headless-${agent}-${alias}`], {
     env: env as NodeJS.ProcessEnv,
     stdio: "ignore",
@@ -83,20 +98,22 @@ function killTmuxSession(agent: AgentName, alias: string, env: Env): void {
 // Removes the conversation id from upstream's session store and keeps the rest of the entry (the
 // Codex profile, the work dir). Writes the file the way upstream's writeSessionStore does.
 function forgetStoredSession(env: Env, agent: AgentName, alias: string): void {
-  const path = sessionStorePath(env);
-  if (!path || !existsSync(path)) return;
-  let store: { agents?: Record<string, Record<string, Record<string, unknown>>> };
-  try {
-    store = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return;
-  }
-  const entry = store.agents?.[agent]?.[alias];
-  if (!entry) return;
-  delete entry.nativeId;
-  delete entry.tmuxWaitStrategy;
-  entry.updatedAt = new Date().toISOString();
-  writeJsonAtomic(path, store);
+  return withForkSessionStoreLock(env, () => {
+    const path = sessionStorePath(env);
+    if (!path || !existsSync(path)) return;
+    let store: { agents?: Record<string, Record<string, Record<string, unknown>>> };
+    try {
+      store = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      return;
+    }
+    const entry = store.agents?.[agent]?.[alias];
+    if (!entry) return;
+    delete entry.nativeId;
+    delete entry.tmuxWaitStrategy;
+    entry.updatedAt = new Date().toISOString();
+    writeJsonAtomic(path, store);
+  });
 }
 
 function marksPath(env: Env): string | undefined {

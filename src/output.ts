@@ -1,4 +1,5 @@
 import type { AgentName } from "./types.js";
+import { antigravityError, antigravityFinalMessage, antigravitySessionId, isAntigravityEvent } from "./fork/antigravity-json.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -232,7 +233,7 @@ function isAntigravityTraceValue(value: unknown): boolean {
 export function isAntigravityStructuredOutput(line: string): boolean {
   try {
     const value = JSON.parse(line) as unknown;
-    return collectCandidates(value, "antigravity").length > 0 || isAntigravityTraceValue(value);
+    return isAntigravityEvent(value) || collectCandidates(value, "antigravity").length > 0 || isAntigravityTraceValue(value);
   } catch {
     return false;
   }
@@ -262,6 +263,10 @@ function formatErrorRecord(record: JsonRecord): string {
 }
 
 export function extractAgentError(agent: AgentName, stdout: string): string {
+  if (agent === "antigravity") {
+    const error = antigravityError(stdout);
+    if (error) return error;
+  }
   const records = parseJsonValues(stdout).flatMap(flattenRecords);
   for (const record of records) {
     const rowType = asString(record.type).trim().toLowerCase();
@@ -349,7 +354,7 @@ function extractAntigravityFinalMessage(stdout: string): string {
 
 export function extractFinalMessage(agent: AgentName, stdout: string): string {
   if (agent === "antigravity") {
-    return extractAntigravityFinalMessage(stdout);
+    return antigravityFinalMessage(stdout) ?? extractAntigravityFinalMessage(stdout);
   }
 
   const values = parseJsonValues(stdout);
@@ -364,7 +369,7 @@ export function extractFinalMessage(agent: AgentName, stdout: string): string {
 
 export function extractNativeSessionId(agent: AgentName, stdout: string): string {
   if (agent === "antigravity") {
-    return "";
+    return antigravitySessionId(stdout);
   }
   const records = parseJsonValues(stdout).flatMap(flattenRecords);
   for (const record of records) {

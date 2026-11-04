@@ -219,7 +219,7 @@ function withAntigravityAllow(args: string[], allow: AllowMode | undefined): str
 
 function buildAntigravity(options: BuildOptions, env: Env): BuiltCommand {
   const args = withModel([], options.model);
-  args.push("-p", options.prompt);
+  args.push("-p", options.prompt, "--output-format", "stream-json");
   if (options.timeoutSeconds !== undefined) {
     args.push("--print-timeout", `${options.timeoutSeconds}s`);
   }

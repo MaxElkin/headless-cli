@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 
 import type { AgentName, Env } from "./types.js";
 import { validateCodexProfileName } from "./codex-profile.js";
+import { withForkSessionStoreLock } from "./fork/session-checkpoint.js";
 
 export type StoredTmuxWaitStrategy =
   | { kind: "pin"; sessionId: string }
@@ -53,56 +54,60 @@ export function writeStoredSession(
   env: Env,
   session: Pick<StoredSession, "agent" | "alias" | "nativeId" | "profile" | "workDir">,
 ): StoredSession {
-  const path = sessionStorePath(env);
-  if (!path) {
-    throw new Error("HOME is required for --session");
-  }
+  return withForkSessionStoreLock(env, () => {
+    const path = sessionStorePath(env);
+    if (!path) {
+      throw new Error("HOME is required for --session");
+    }
 
-  const store = readSessionStore(env);
-  const existing = store.agents[session.agent]?.[session.alias];
-  const now = new Date().toISOString();
-  const stored: StoredSession = {
-    agent: session.agent,
-    alias: session.alias,
-    nativeId: session.nativeId,
-    profile: session.profile ?? existing?.profile,
-    tmuxWaitStrategy: existing?.tmuxWaitStrategy,
-    workDir: session.workDir,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-  };
+    const store = readSessionStore(env);
+    const existing = store.agents[session.agent]?.[session.alias];
+    const now = new Date().toISOString();
+    const stored: StoredSession = {
+      agent: session.agent,
+      alias: session.alias,
+      nativeId: session.nativeId,
+      profile: session.profile ?? existing?.profile,
+      tmuxWaitStrategy: existing?.tmuxWaitStrategy,
+      workDir: session.workDir,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
 
-  store.agents[session.agent] = { ...(store.agents[session.agent] ?? {}), [session.alias]: stored };
-  writeSessionStore(path, store, env[SECURE_SESSION_STORE_ENV] === "1");
-  return stored;
+    store.agents[session.agent] = { ...(store.agents[session.agent] ?? {}), [session.alias]: stored };
+    writeSessionStore(path, store, env[SECURE_SESSION_STORE_ENV] === "1");
+    return stored;
+  });
 }
 
 export function writeStoredTmuxSession(
   env: Env,
   session: Pick<StoredSession, "agent" | "alias" | "profile" | "tmuxWaitStrategy" | "workDir">,
 ): StoredSession {
-  const path = sessionStorePath(env);
-  if (!path) {
-    throw new Error("HOME is required for --session");
-  }
+  return withForkSessionStoreLock(env, () => {
+    const path = sessionStorePath(env);
+    if (!path) {
+      throw new Error("HOME is required for --session");
+    }
 
-  const store = readSessionStore(env);
-  const existing = store.agents[session.agent]?.[session.alias];
-  const now = new Date().toISOString();
-  const stored: StoredSession = {
-    agent: session.agent,
-    alias: session.alias,
-    nativeId: existing?.nativeId,
-    profile: session.profile ?? existing?.profile,
-    tmuxWaitStrategy: session.tmuxWaitStrategy,
-    workDir: session.workDir,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-  };
+    const store = readSessionStore(env);
+    const existing = store.agents[session.agent]?.[session.alias];
+    const now = new Date().toISOString();
+    const stored: StoredSession = {
+      agent: session.agent,
+      alias: session.alias,
+      nativeId: existing?.nativeId,
+      profile: session.profile ?? existing?.profile,
+      tmuxWaitStrategy: session.tmuxWaitStrategy,
+      workDir: session.workDir,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
 
-  store.agents[session.agent] = { ...(store.agents[session.agent] ?? {}), [session.alias]: stored };
-  writeSessionStore(path, store, env[SECURE_SESSION_STORE_ENV] === "1");
-  return stored;
+    store.agents[session.agent] = { ...(store.agents[session.agent] ?? {}), [session.alias]: stored };
+    writeSessionStore(path, store, env[SECURE_SESSION_STORE_ENV] === "1");
+    return stored;
+  });
 }
 
 function readSessionStore(env: Env): SessionStoreFile {

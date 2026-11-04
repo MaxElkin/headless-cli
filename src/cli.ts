@@ -38,6 +38,8 @@ import {
   waitTierForAgent,
 } from "./agents.js";
 import { prepareAntigravityUsageCapture, type AntigravityUsageCapture } from "./antigravity-usage.js";
+import { antigravityError } from "./fork/antigravity-json.js";
+import { AntigravityThoughts } from "./fork/antigravity-thoughts.js";
 import { BillingError, prepareBillingAttempt, prepareBillingPreview, resolveBillingMode } from "./billing.js";
 import { runWithBilling, type BillingExecutionAttempt, type BillingRunResult } from "./billing-run.js";
 import { resolveCapacityRetries, waitForCapacityRetry } from "./capacity-retry.js";
@@ -155,13 +157,16 @@ import { expandTeamSpecs } from "./teams.js";
 import type { AgentName, AllowMode, BillingMode, BuildOptions, BuiltCommand, Env, ReasoningEffort } from "./types.js";
 import { buildWithForkAllow, isForkAllowMode } from "./fork/allow.js";
 import { ProgressRenderer, TranscriptFollower } from "./trace-events.js";
-import { applyForkClean, validateForkClean } from "./fork/clean.js";
+import { applyForkClean, forgetForkSession, validateForkClean } from "./fork/clean.js";
 import {
   describeForkSchema, loadForkSchema, validateForkSchema, withForkSchemaArgs,
   withForkSchemaPrompt,
 } from "./fork/schema.js";
 import { withForkProgressArgs } from "./fork/progress.js";
 import { ProgressFile } from "./fork/progress-file.js";
+import { OpenCodeToolProgress } from "./fork/opencode-progress.js";
+import { SessionCheckpoint } from "./fork/session-checkpoint.js";
+import { forkSource, withForkConversation } from "./fork/conversations.js";
 import { WorkingLine } from "./fork/working.js";
 import { buildForkAttachCommand, forkAttachTmuxSession, validateForkAttach } from "./fork/attach.js";
 import { beginForkTmuxClaim, claimForkTmuxSession, planForkTmuxSession, recordForkTmuxSession } from "./fork/sessions.js";
@@ -175,6 +180,8 @@ interface ParsedArgs {
   forkAttach?: boolean;
   forkCleanBefore?: boolean;
   forkCleanAfter?: boolean;
+  forkForgetSession?: boolean;
+  forkFrom?: string;
   forkJsonSchema?: string;
   send: boolean;
   sendSession?: string;
@@ -216,6 +223,7 @@ interface ParsedArgs {
   agentArgs: string[];
   tmuxName?: string;
   sessionAlias?: string;
+  forkCheckpointSession?: boolean;
   docker: boolean;
   dockerImage?: string;
   dockerArgs: string[];
@@ -317,7 +325,7 @@ function usage(): string {
     "  --profile <name>      Codex configuration profile.",
     "  --fast                Enable Fast mode for Codex or Claude.",
     "  --no-fast             Disable ambient Fast mode for Codex or Claude.",
-    "  --reasoning-effort, --effort <level> Reasoning effort: low, medium, high, or xhigh.",
+    "  --reasoning-effort, --effort <level> Reasoning effort: low, medium, high, xhigh, or max (native support required).",
     "  --billing <auto|subscription|api> Subscription first (default); Claude API uses Bedrock.",
     "  --allow <mode>        Permission mode: read-only, yolo, project, ask, or auto.",
     "  --acp-agent <id>      With acp, resolve an ACP server from the registry by id or name.",
@@ -353,6 +361,7 @@ function usage(): string {
     "  --debug              Stream raw trace and print extracted final message.",
     "  --progress           Show what the agent says and which tools it calls on stderr as it works.",
     "  --progress-file <path> Append the same events, timed and uncut, to a JSON Lines file.",
+    "  --checkpoint-session Save a local named session as soon as its native trace identifies it, for interruption and resumption.",
     "  --usage              Append normalized token and API-equivalent cost JSON.",
     "  --tmux               Launch an interactive agent in a tmux session.",
     "  --attach             Like --tmux, then attach this terminal to the new session.",
@@ -362,6 +371,8 @@ function usage(): string {
     "  --session <name>     Start or resume a named Headless session.",
     "  --clean-before       With --session, start a new conversation, closing its tmux session if it runs.",
     "  --clean-after        With --session, start a new conversation on the first launch after this one stops.",
+    "  --forget-session     With --session, forget a stopped session's conversation binding without launching an agent.",
+    "  --fork-from <name>   Fork a stored conversation into a distinct --session (local one-shot Claude, Codex, OpenCode).",
     "  --json-schema <s>    JSON Schema, or a path to one, the final reply must match. Given to the harness's own flag where it has one (claude, codex, antigravity), asked for in the prompt otherwise.",
     "  attach [session]     Attach to one or all active headless tmux sessions.",
     "  --all                With attach, tile all active headless tmux sessions.",
@@ -611,6 +622,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--session":
         parsed.sessionAlias = takeValue(args, arg);
         break;
+      case "--fork-from":
+        parsed.forkFrom = takeValue(args, arg);
+        break;
       case "--json":
         parsed.json = true;
         break;
@@ -625,6 +639,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--progress-file":
         parsed.progressFile = takeValue(args, arg);
+        break;
+      case "--checkpoint-session":
+        parsed.forkCheckpointSession = true;
         break;
       case "--usage":
         parsed.usage = true;
@@ -646,6 +663,9 @@ function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--clean-after":
         parsed.forkCleanAfter = true;
+        break;
+      case "--forget-session":
+        parsed.forkForgetSession = true;
         break;
       case "--json-schema":
         parsed.forkJsonSchema = takeValue(args, arg);
@@ -806,7 +826,7 @@ function validateSafeName(value: string | undefined, label: string): string {
 }
 
 function parseReasoningEffort(value: string): ReasoningEffort {
-  if (value === "low" || value === "medium" || value === "high" || value === "xhigh") {
+  if (value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max") {
     return value;
   }
   throw new CliError(`unsupported reasoning effort: ${value}`);
@@ -1870,7 +1890,7 @@ async function executeCommand(
       const maxCapturedTraceRowBytes = 4 * 1024 * 1024;
       const maxPinnedIdentityBytes = 16 * 1024;
       const relevantTracePattern =
-        /"(?:usage|stats|tokens|context_window|num_turns|duration_ms|duration_api_ms|total_cost_usd|thread_id|session_id|sessionId|sessionID)"\s*:|"type"\s*:\s*"(?:thread\.started|turn\.completed|result|step_finish|message_end|agent_message|response_item|item\.completed|assistant|model|text|planner_response|assistant_response)"|"role"\s*:\s*"assistant"/i;
+        /"(?:usage|stats|tokens|context_window|num_turns|duration_ms|duration_api_ms|total_cost_usd|thread_id|session_id|sessionId|sessionID|conversation_id)"\s*:|"event"\s*:\s*"(?:init|result|error)"|"type"\s*:\s*"(?:thread\.started|turn\.completed|result|step_finish|message_end|agent_message|response_item|item\.completed|assistant|model|text|planner_response|assistant_response)"|"role"\s*:\s*"assistant"/i;
       const codexIdentityPattern = /"type"\s*:\s*"thread\.started"/;
       const appendRelevantTrace = (line: string) => {
         let trimmed = line.trim();
@@ -4125,6 +4145,16 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         ? (config.general.defaultAgent ?? autoAgentPreference[0])
         : selectDefaultAgent(env, config.general.defaultAgent);
     }
+    if (parsed.forkForgetSession) {
+      validateSessionAlias(parsed.sessionAlias);
+      if (!parsed.sessionAlias) throw new CliError("--forget-session requires --session");
+      if (parsed.tmux || parsed.docker || parsed.modal || parsed.prompt !== undefined || parsed.promptFile !== undefined || parsed.forkCheckpointSession || parsed.forkCleanBefore || parsed.forkCleanAfter || parsed.forkFrom !== undefined) {
+        throw new CliError("--forget-session is a local cleanup operation; do not combine it with launch options");
+      }
+      if (!parsed.printCommand) forgetForkSession(parsed.agent, parsed.sessionAlias, env);
+      stdout(`${parsed.printCommand ? "Would forget" : "Forgot"} conversation binding for ${parsed.agent}/${parsed.sessionAlias}\n`);
+      return 0;
+    }
     if (parsed.fast !== undefined && parsed.agent !== "claude" && parsed.agent !== "codex") {
       throw new CliError("--fast is supported only by claude and codex");
     }
@@ -4200,6 +4230,11 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     }
     validateSessionAlias(parsed.sessionAlias);
     validateForkClean(parsed);
+    if (parsed.forkFrom !== undefined && (!parsed.sessionAlias || parsed.tmux || parsed.docker || parsed.modal || parsed.runId || parsed.forkCleanBefore || parsed.forkCleanAfter)) {
+      throw new CliError("--fork-from requires a local one-shot --session without run coordination or cleaning flags");
+    }
+    const sourceConversation = forkSource(parsed.agent, parsed.forkFrom, parsed.sessionAlias, env);
+    if (parsed.forkCheckpointSession && (!parsed.sessionAlias || parsed.tmux || parsed.docker || parsed.modal)) throw new CliError("--checkpoint-session requires a local one-shot --session");
     validateForkSchema(parsed);
     const coordination = effectiveCoordination(parsed, config.general.coordination);
     if (
@@ -4646,7 +4681,9 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     const sessionEnv = dockerSessionHome
       ? { ...env, HOME: dockerSessionHome, [SECURE_SESSION_STORE_ENV]: "1" }
       : env;
-    let sessionPlan = buildSessionPlan(parsed.agent, sessionAlias, sessionEnv, parsed.profile);
+    let sessionPlan: SessionPlan | undefined = sourceConversation
+      ? { alias: sessionAlias!, mode: "new", profile: parsed.profile ?? sourceConversation.profile }
+      : buildSessionPlan(parsed.agent, sessionAlias, sessionEnv, parsed.profile);
     const effectiveProfile = sessionPlan?.profile ?? profile;
     const billingOptions = { ...billingPreviewOptions, profile: effectiveProfile };
     const initialBilling = parsed.printCommand
@@ -4673,7 +4710,9 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     }, commandSessionPlan);
     const buildAttemptCommand = (attemptEnv: Env, options: BuildOptions): BuiltCommand => {
       let built = withForkProgressArgs(parsed.agent!, withForkSchemaArgs(parsed.agent!, withAgentArgs(
-        withRunEnvironment(buildAgentCommand(parsed.agent!, options, attemptEnv), parsed.runId, nodeId),
+        withRunEnvironment(withForkConversation(parsed.agent!, buildAgentCommand(parsed.agent!, options, attemptEnv),
+          sourceConversation && options.sessionMode !== "resume" ? sourceConversation.nativeId : undefined,
+          sessionPlan && !parsed.docker && !parsed.modal ? options.workDir : undefined), parsed.runId, nodeId),
         parsed,
       ), forkSchema), parsed.progress || parsed.progressFile !== undefined);
       const masks = Object.fromEntries(Object.entries(attemptEnv).filter(([, value]) => value === undefined));
@@ -4758,8 +4797,16 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
     const progress = parsed.progress ? new ProgressRenderer(parsed.agent, progressWrite, cwd ?? process.cwd()) : undefined;
     const progressFile = parsed.progressFile === undefined ? undefined
       : new ProgressFile(parsed.progressFile, parsed.agent, progressWrite);
-    // Antigravity prints only its reply; what it does is in its transcript.
-    const followed = (progress || progressFile) && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal;
+    const openCodeProgress = parsed.agent === "opencode" && !parsed.docker && !parsed.modal && (progress || progressFile)
+      ? new OpenCodeToolProgress(env, (chunk) => { progress?.feed(chunk); progressFile?.feed(chunk); }, progressWrite)
+      : undefined;
+    const sessionCheckpoint = new SessionCheckpoint(parsed.agent,
+      parsed.forkCheckpointSession || sourceConversation ? sessionPlan : undefined,
+      sessionEnv, cwd ?? process.cwd(), progressWrite, sourceConversation?.nativeId,
+      sourceConversation ? (id) => progressFile?.forked(sourceConversation.alias, sessionPlan!.alias, id) : undefined);
+    // Native stream-json supplies progress directly; only legacy commands need a transcript follower.
+    const followed = (progress || progressFile) && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal
+      && !command.args.includes("--output-format");
     const resumed = followed && sessionPlan?.mode === "resume"
       ? resumedTranscript(parsed.agent, sessionPlan.nativeId, cwd ?? process.cwd(), env)
       : undefined;
@@ -4774,6 +4821,13 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         undefined,
         resumed?.from,
       )
+      : undefined;
+    const antigravityThoughts = (progress || progressFile) && parsed.agent === "antigravity" && !parsed.docker && !parsed.modal
+      && command.args.includes("--output-format")
+      ? new AntigravityThoughts(env, cwd ?? process.cwd(), (text) => {
+        progress?.observe({ kind: "thinking", text });
+        progressFile?.observe({ kind: "thinking", text });
+      }, sessionPlan?.mode === "resume" ? sessionPlan.nativeId : undefined)
       : undefined;
     const waitingSpinner =
       stdoutHandling === "capture" && stderrIsTTY && !statusReporter && !parsed.sdkFormat && !progress
@@ -4794,6 +4848,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
       workDir: cwd ?? process.cwd(),
     });
     transcriptProgress?.start();
+    openCodeProgress?.start();
     working?.start();
     let result: ExecuteResult | undefined;
     let billingResult: BillingRunResult | undefined;
@@ -4883,8 +4938,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
               attempt.timeoutSeconds ?? modalTimeoutSeconds,
               (text) => {
                 piCompletion?.write(text);
+                openCodeProgress?.feed(text);
                 progress?.feed(text);
                 progressFile?.feed(text);
+                sessionCheckpoint.feed(text);
                 attempt.observe(text);
                 if (stdoutHandling === "capture") commandStdoutLog?.(text);
               },
@@ -4914,15 +4971,18 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
             cwd, attempt.env, displayStderr, {
               stdout: commandStdout, stdoutHandling,
               stdoutLog: (text) => {
+                antigravityThoughts?.feed(text);
                 piCompletion?.write(text);
+                openCodeProgress?.feed(text);
                 progress?.feed(text);
                 progressFile?.feed(text);
+                sessionCheckpoint.feed(text);
                 attempt.observe(text);
                 commandStdoutLog?.(text);
               }, stderr: commandStderr,
               timeoutSeconds,
               captureFinalMessageTrace: Boolean(parsed.sdkFormat) || (parsed.agent === "antigravity" && parsed.json && Boolean(parsed.runId)),
-              captureRelevantTrace: Boolean(parsed.sdkFormat) || parsed.usage || (parsed.json && (Boolean(parsed.runId) || Boolean(parsed.sessionAlias))),
+              captureRelevantTrace: parsed.agent === "antigravity" || Boolean(parsed.sdkFormat) || parsed.usage || (parsed.json && (Boolean(parsed.runId) || Boolean(parsed.sessionAlias))),
               maxFinalMessageTraceBytes: parsed.sdkFormat ? sdkCaptureLimitBytes : undefined,
               waitForStdoutDrain: parsed.sdkFormat === "ndjson" ? waitForSdkStdoutDrain : undefined,
               cleanupBeforeParentSignalExit: antigravityUsageCapture?.cleanup, inheritedSignalListeners,
@@ -4930,9 +4990,11 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
             );
           });
       } finally {
+        openCodeProgress?.stop();
         piCompletion?.end();
         progress?.flush();
         transcriptProgress?.stop();
+        antigravityThoughts?.stop();
         working?.stop();
         waitingSpinner?.stop();
         antigravityUsageTrace = antigravityUsageCapture?.read() ?? "";
@@ -4947,6 +5009,8 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         throw new CliError("agent execution did not produce a result");
       }
       const commandTrace = result.stdout || result.finalMessageTrace || result.usageTrace || "";
+      const antigravityFailure = parsed.agent === "antigravity" ? antigravityError(commandTrace) : "";
+      if (antigravityFailure && result.code === 0) result = { ...result, code: 1 };
       const piOutcome = piCompletion?.outcome;
       const piError = piOutcome?.status === "error" ? `pi error: ${piOutcome.error}`
         : piOutcome?.status === "unknown" && piCompletion?.observedLifecycle
@@ -4954,6 +5018,10 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           : undefined;
       const piFinalMessage = piOutcome?.status === "success" ? piOutcome.finalMessage : undefined;
       if (piError && result.code === 0) result = { ...result, code: 1 };
+      if (result.code === 0 && sourceConversation && !sessionCheckpoint.nativeId) {
+        displayStderr("headless: native fork did not checkpoint a distinct new conversation id\n");
+        result = { ...result, code: 1 };
+      }
       progressFile?.end(result.code);
       billingHomeCompleted = result.code === 0;
       const usageCommandTrace = result.stdout || result.usageTrace || result.finalMessageTrace || "";
@@ -4978,7 +5046,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
           cwd,
           sessionEnv,
           dockerSessionHome,
-          capturedNativeSessionId,
+          sessionCheckpoint.nativeId ?? capturedNativeSessionId,
         );
       }
       if (parsed.runId && parsed.role && nodeId) {
@@ -5035,6 +5103,7 @@ export async function runCli(argv: string[], deps: CliDeps = {}): Promise<number
         return result.code;
       }
       if (parsed.json) {
+        if (antigravityFailure) stderr(`headless: ${antigravityFailure}\n`);
         if (piError) stderr(`headless: ${piError}\n`);
         if (parsed.usage) {
           const stdoutEndsWithNewline = result.stdoutEndsWithNewline ?? result.stdout.endsWith("\n");

@@ -2,6 +2,8 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 
 import type { AgentName } from "./types.js";
+import { OpenCodeToolCalls } from "./fork/opencode-progress.js";
+import { antigravityJsonEvents } from "./fork/antigravity-json.js";
 
 /**
  * What an agent is doing, in one shape whichever harness it runs under.
@@ -319,7 +321,7 @@ function harnessEvents(agent: AgentName, value: unknown): TraceEvent[] {
   if (Object.keys(record).length === 0) return [];
   if (agent === "claude") return claudeEvents(record);
   if (agent === "codex") return codexEvents(record);
-  if (agent === "antigravity") return antigravityEvents(record);
+  if (agent === "antigravity") return antigravityJsonEvents(record) ?? antigravityEvents(record);
   if (agent === "opencode") return opencodeEvents(record);
   return [];
 }
@@ -423,6 +425,7 @@ function thoughtLines(text: string): string[] {
  */
 export class ProgressRenderer {
   private pending = "";
+  private readonly toolCalls = new OpenCodeToolCalls();
   /**
    * The last message, held until what follows it says what it was. A message
    * with more work after it is the agent saying what it is about to do —
@@ -457,6 +460,11 @@ export class ProgressRenderer {
     this.pending = "";
     if (this.held) this.emit(this.held);
     this.held = undefined;
+  }
+
+  /** Supplemental events must not be injected into a possibly partial native JSON line. */
+  observe(event: TraceEvent): void {
+    this.event(event);
   }
 
   private event(event: TraceEvent): void {
@@ -497,7 +505,7 @@ export class ProgressRenderer {
     } catch {
       return;
     }
-    for (const event of traceEvents(this.agent, value)) this.event(event);
+    for (const event of this.toolCalls.events(this.agent, value, traceEvents(this.agent, value))) this.event(event);
   }
 }
 

@@ -71,7 +71,7 @@ test("builds read-only commands for supported agents", () => {
 
   assert.deepEqual(buildAgentCommand("antigravity", { prompt: "hello", allow: "read-only", workDir: "/work" }, {}), {
     command: "agy",
-    args: ["-p", "hello", "--sandbox"],
+    args: ["-p", "hello", "--output-format", "stream-json", "--sandbox"],
   });
 
   assert.deepEqual(buildAgentCommand("opencode", { prompt: "hello", allow: "read-only" }, {}), {
@@ -144,6 +144,8 @@ test("builds explicit yolo commands for supported agents", () => {
   assert.deepEqual(buildAgentCommand("antigravity", { prompt: "hello", allow: "yolo", workDir: "/work" }, {}).args, [
     "-p",
     "hello",
+    "--output-format",
+    "stream-json",
     "--dangerously-skip-permissions",
   ]);
   assert.deepEqual(buildAgentCommand("opencode", { prompt: "hello", allow: "yolo" }, {}).args, [
@@ -241,12 +243,12 @@ test("CLI rejects invalid allow mode", async () => {
 
 test("CLI rejects invalid reasoning effort", async () => {
   const stderr: string[] = [];
-  const code = await runCli(["codex", "--reasoning-effort", "max", "--prompt", "hello"], {
+  const code = await runCli(["codex", "--reasoning-effort", "unknown", "--prompt", "hello"], {
     stderr: (text) => stderr.push(text),
   });
 
   assert.equal(code, 2);
-  assert.match(stderr.join(""), /unsupported reasoning effort: max/);
+  assert.match(stderr.join(""), /unsupported reasoning effort: unknown/);
 });
 
 test("preserves ambient fast settings unless a mode is explicit", () => {

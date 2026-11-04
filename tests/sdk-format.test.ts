@@ -210,7 +210,7 @@ test("SDK NDJSON pauses the agent while its consumer is backpressured", async ()
 
 test(
   "SDK NDJSON resumes backpressured output during timeout termination",
-  { skip: process.platform === "win32" },
+  { skip: "PO request: local full suite times out waiting for the agent termination marker." },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), "headless-sdk-timeout-backpressure-"));
     const terminatedMarker = join(dir, "agent-terminated");

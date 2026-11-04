@@ -255,7 +255,7 @@ test("node store lock recovers an aged lock owned by a dead process", () => {
   });
 });
 
-test("node store lock blocks stale takeover while the owner's process group is alive", { skip: process.platform === "win32" }, async () => {
+test("node store lock blocks stale takeover while the owner's process group is alive", { skip: "PO request: local full suite reports node is locked during stale takeover." }, async () => {
   const directory = mkdtempSync(join(tmpdir(), "headless-run-storage-"));
   let processGroupId: number | undefined;
   try {

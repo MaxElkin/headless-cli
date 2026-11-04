@@ -17,7 +17,7 @@ printf "Review this diff" | headless pi --model claude-opus
 | Agent | Command shape |
 | --- | --- |
 | `acp` | `headless acp-client -- <acp-server-command>`, selected with `--acp-agent` or `--acp-command` |
-| `antigravity` | `agy -p ... --dangerously-skip-permissions` |
+| `antigravity` | `agy -p ... --output-format stream-json --dangerously-skip-permissions` |
 | `claude` | `claude -p ... --output-format stream-json --verbose --dangerously-skip-permissions` |
 | `codex` | `codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check ...` |
 | `cursor` | `agent -p --trust --force --output-format stream-json --model gpt-5.5-medium ...` |
@@ -57,6 +57,10 @@ Environment equivalents are also supported: `HEADLESS_ACP_AGENT`, `HEADLESS_ACP_
 
 ## Permissions and Reasoning
 
+`max` is also accepted as a native effort level when the selected harness and model
+support it, including OpenCode's `--variant max`. It is passed through unchanged,
+not normalized to `xhigh`, and is also accepted in `reasoning_effort` config defaults.
+
 By default, Headless uses each agent's native auto-approve/bypass mode. Pass `--allow read-only` to use each agent's read-only or planning mode where available. Pass `--allow yolo` to request full tool access explicitly.
 
 Pass `--reasoning-effort low|medium|high|xhigh` or `--effort low|medium|high|xhigh` to request a normalized reasoning effort for agents with native support. Claude receives `--effort`, Codex receives `model_reasoning_effort`, Cursor combines the model family and effort into Cursor's model variant string, OpenCode receives `--variant` in one-shot mode, and Pi receives `--thinking`. Docker and Modal inherit the same one-shot command. In tmux mode, Claude, Codex, Cursor, and Pi receive their interactive effort flags. OpenCode's TUI has no `--variant`, so it receives the effort through `OPENCODE_CONFIG_CONTENT`, as the default variant of its `build` and `plan` agents, with the model set on them too, since opencode applies an agent's variant only to the agent's own model. The TUI sends its own variant first, though: the one it saved for the model across sessions, or a continued session's last one. So the model is left with the effort's variant alone, the others disabled in the same config: the TUI's is then none of the model's, it sends none, and opencode takes the agent's, in a continued session as in a new one. Antigravity and Gemini accept the option, leave the command unchanged, and print a warning.
@@ -92,7 +96,9 @@ headless --prompt "identity" --print-command --json
 headless codex --prompt "Fix the failing tests" --debug
 ```
 
-`--progress` shows the run on stderr as it goes — its thinking set apart with `💭`, as is what it says on the way, its reply with `💬`, one line per tool call — `📖` reading or searching, `📝` editing, `🔧` anything else, a shell command included — and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole, and so are the files an edit touches, one per line; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams; OpenCode reports a tool call once it has finished. Antigravity prints no events, so for a local run its transcript under `brain/<conversation>/` is followed instead: for a resumed `--session`, its conversation's from where it stood at launch; otherwise the first one started after the run and asked its prompt. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
+`--progress` shows the run on stderr as it goes — its thinking set apart with `💭`, as is what it says on the way, its reply with `💬`, one line per tool call — `📖` reading or searching, `📝` editing, `🔧` anything else, a shell command included — and the calls that failed — while stdout still carries only the extracted final message, so a caller reading the reply is unaffected. A shell command is shown whole, and so are the files an edit touches, one per line; other calls' subjects are cut to one line. It replaces the waiting spinner. Claude, Codex and OpenCode traces are rendered from their event streams. Local OpenCode runs also read running tools from their session's database through read-only `sqlite3` queries, so a long call is visible before it finishes. Each call appears once; a later failure is still reported. Antigravity uses native stream-json tools and its final result, supplemented locally by thought text from the exact conversation's transcript; resumed sessions skip earlier history, and transcript tools/replies are not replayed. For other agents it shows nothing. It cannot be combined with `--json`, `--debug`, `--sdk-format` or `--tmux`.
+
+Antigravity one-shot execution requires agy 1.4.12's native streaming format. With `--json-schema`, ordinary stdout is the successful result's `structured_output`, not the enclosing native result or intermediate response text. Without a structured value it uses the final `response`. Raw `--json` retains the native envelopes. Missing final results, unsuccessful statuses and early-finish reasons fail the invocation. See [Antigravity JSON](fork/headless-fork-spec.md#antigravity-json).
 
 ```bash
 headless codex --prompt "Fix the failing tests" --progress
@@ -114,6 +120,12 @@ headless codex --prompt "Fix the failing tests" --progress
 With `--sdk-format ndjson`, each `trace` envelope also carries `data.events`: the same events as `--progress` shows, in one shape for every agent whose trace is known (`message`, `thinking`, `tool`, `tool_result`, `error`), beside the native record in `data.value`. It is absent when a record holds nothing worth showing. A `tool` event that edits files also lists them in `paths`, since `summary` joins them with `, `.
 
 `--progress-file <path>` appends the same events to a file, one JSON object a line, for whatever watches or audits the run from outside: each event as `data.events` has it, plus `time` (ISO 8601, UTC), nothing cut and paths as the harness gave them. The first line, `{"kind":"start","agent","model","session","workDir"}`, says what ran; the last, `{"kind":"end","exitCode"}`, that the run ended, so a file without it was cut short. Lines are written whole, one at a time, so a reader following the file never sees half of one. The file is appended to and never truncated: a second run given the same path adds its own `start` line after the first run's `end`. It works with or without `--progress`, and asks Codex for its thinking as `--progress` does. It cannot be combined with `--tmux` or `--attach`.
+
+For local OpenCode runs, both progress outputs include running tools observed from
+the exact session's database every 500 ms. Earlier conversation history is excluded.
+This requires `sqlite3`; a query failure warns once and completion events continue
+from stdout. Docker and Modal retain completion-only OpenCode tool reporting.
+The extra running-tool observations do not alter raw stdout or SDK trace events.
 
 ```bash
 headless opencode --prompt "Fix the failing tests" --progress-file runs/fix.jsonl
@@ -185,7 +197,31 @@ Pass `--session <name>` to start or resume a named native session. Headless stor
 headless codex --prompt "Continue the fix" --session bughunt
 ```
 
-For Antigravity, Headless stores the native conversation id from `~/.gemini/antigravity-cli/brain/<conversation-id>/transcript.jsonl` after the first successful run and resumes with `agy --conversation <conversation-id>`.
+Use `--fork-from base --session child` to branch a stored Claude, Codex or
+OpenCode conversation into a distinct destination. The source stays unchanged;
+subsequent `--session child` calls resume the branch. This requires a local
+one-shot invocation. Missing sources and unsupported harnesses fail explicitly.
+See [Forked conversations](fork/headless-fork-spec.md#forked-conversations).
+
+For local one-shot runs, `--checkpoint-session` saves the binding as soon as the
+native trace identifies the conversation, allowing a later turn to resume even
+if the initial process is interrupted.
+
+To forget a stopped conversation binding immediately, without a prompt or model
+invocation:
+
+```bash
+headless codex --session bughunt --forget-session
+```
+
+This preserves native conversation history and stored profile/work-directory
+metadata, and clears any deferred `--clean-after` mark. A later launch under the
+alias starts a new conversation. A live named tmux session is refused; wait for
+one-shot processes to exit before forgetting them. Add `--print-command` for a
+read-only preview. See [Clean sessions](fork/headless-fork-spec.md#clean-sessions)
+for the cleaning flags and lifecycle rules.
+
+For Antigravity, Headless reads the native conversation id from its stream-json envelopes and resumes with `agy --conversation <conversation-id>`. With `--checkpoint-session`, a new alias is saved as soon as the native stream identifies it, before the final reply. Transcript discovery remains a fallback for historical output and interactive tmux execution.
 
 Pass `--tmux` to create a detached interactive session named `headless-<agent>-<pid>`, start the selected agent with the prompt as its initial message, print an attach command, and exit. Pass `--wait` with `--tmux` to wait until the agent's native transcript reports completion, then print the final assistant message. `--wait` identifies this run's transcript without altering the executed prompt, using each harness's native mechanism: Claude and Gemini pin a caller-assigned `--session-id`, Cursor mints and resumes a session id, OpenCode tags the session with a unique title, Pi isolates the run in its own `--session-dir`, and Antigravity/Codex claim the brand-new native transcript under a short per-(agent, working-directory) launch lock so concurrent runs in the same directory never pick up each other's transcript. Set `HEADLESS_TMUX_WAIT_FORCE_MARKER=1` to fall back to the legacy behavior of appending a single-line marker comment to the prompt for supported transcript-backed agents. Add `--delete` to kill the tmux session after that final message is captured. Pass `--name <name>` for a stable managed session name. Pass `--session <name>` for start-or-send behavior: if `headless-<agent>-<name>` is active, Headless sends the prompt there; otherwise it starts that named session.
 
@@ -327,7 +363,7 @@ Options:
 - `--model`, `--agent-model`: model override passed to the agent CLI.
 - `--profile`: Codex configuration profile for this invocation; persisted by named sessions and coordinated run nodes.
 - `--fast`: opt into Fast mode for Codex or Claude; off by default and not config-driven.
-- `--reasoning-effort`, `--effort`: normalized reasoning effort, one of `low`, `medium`, `high`, or `xhigh`.
+- `--reasoning-effort`, `--effort`: reasoning effort, one of `low`, `medium`, `high`, `xhigh`, or native `max` (selected harness/model must support it).
 - `--allow`: permission mode, either `read-only` or `yolo`.
 - `--acp-agent`: with `acp`, resolve an ACP server from the registry by id or name.
 - `--acp-command`: with `acp`, run a custom ACP server command such as `atlas alta agent run`.

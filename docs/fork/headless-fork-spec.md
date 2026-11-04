@@ -10,10 +10,13 @@ Fork of [RobertTLange/headless-cli](https://github.com/RobertTLange/headless-cli
 | [Permission modes](#permission-modes) | `--allow project`, `ask` and `auto`, which keep the agent's own permission config, and a `[general] allow` config default |
 | [Attach](#attach) | `--attach`, which launches a tmux session (or reuses a live one) and attaches the terminal to it |
 | [Sessions](#sessions) | `--tmux --session <name>` resumes the agent's conversation when the tmux session is gone |
+| [Forked conversations](#forked-conversations) | `--fork-from <source>` branches a stored native conversation into a distinct destination |
 | [Clean sessions](#clean-sessions) | `--clean-before` and `--clean-after`, which let one session name start a new conversation |
 | [Structured output](#structured-output) | `--json-schema`, which holds the agent's reply to a JSON Schema |
+| [Antigravity JSON](#antigravity-json) | Native streaming results, structured replies, progress and conversation identity from agy 1.4.12 |
 | [Visible thinking](#visible-thinking) | `--progress` shows the agent's thinking with 💭 and its reply with 💬, and asks Codex for its thinking |
 | [Progress file](#progress-file) | `--progress-file <path>` appends the run's events, timed and uncut, as JSON lines, and edit events list their `paths` |
+| [Native max effort](#native-max-effort) | `--effort max` preserves a model's native maximum variant, including OpenCode's DeepSeek models |
 
 What it doesn't do yet is in [headless-fork-backlog.md](headless-fork-backlog.md).
 
@@ -84,6 +87,16 @@ Upstream edits:
 
 Test: `fork-allow`.
 
+## Native max effort
+
+`--reasoning-effort max` (also `--effort max`) and config `reasoning_effort = "max"`
+preserve the native level instead of translating it to `xhigh`. The selected harness
+and model must support it; OpenCode receives `--variant max` in one-shot mode and
+its `max` agent variant in the TUI.
+
+Upstream edits are entries in the `ReasoningEffort` union in `src/types.ts`, the
+accepted values in `src/cli.ts` and `src/config.ts`, and CLI help. Test: `fork-effort`.
+
 ## Attach
 
 `--attach` implies `--tmux`. The session is still created detached, and every post-launch step runs
@@ -131,6 +144,14 @@ claimed only if a message is sent within the timeout.
 One-shot and tmux runs share the store, so a conversation started with `headless claude --session x`
 can be continued with `headless claude --attach --session x`, and the other way round.
 
+With `--checkpoint-session`, new local one-shot sessions are checkpointed as soon as their native JSON trace
+identifies the conversation, before a final reply or successful exit. A caller
+can therefore stop a running worker and resume its actual conversation under the
+same alias. `src/fork/session-checkpoint.ts` buffers partial trace lines and
+records the first native id. Ordinary runs keep their existing persistence rules.
+The flag requires a local one-shot `--session`. Named-session writes and cleaning use a shared
+read/modify/write lock so concurrent workers and supervisors retain both aliases.
+
 Under `--wait` the fork does not set an identity. Upstream's wait plan chooses it, so a new
 conversation starts, and the fork records the id from upstream's wait strategy (`pin` or `claim`).
 Other agents are unchanged.
@@ -144,6 +165,40 @@ Upstream edits:
   the `finally`; `recordForkTmuxSession` after a successful launch.
 
 Test: `fork-sessions`.
+
+One-shot checkpoint hooks: the import, construction and two trace-feed calls in
+`src/cli.ts`; the write wrappers in `src/sessions.ts`; and the cleaning wrapper
+in `src/fork/clean.ts`. Tests: `fork-session-checkpoint` (including real interrupted
+CLI execution and concurrent writers).
+
+## Forked conversations
+
+`--fork-from SOURCE --session DESTINATION` forks a stored conversation in a
+local one-shot invocation. SOURCE and DESTINATION must differ; SOURCE must have
+an existing native conversation in the selected harness. A running destination
+is refused. It supports Claude (`--resume ID --fork-session`), Codex
+(`exec fork ID`) and OpenCode (`run --session ID --fork`); other harnesses fail
+explicitly. It cannot be combined with tmux, Docker, Modal, run coordination or
+cleaning flags. `--print-command` validates and prints without changing bindings.
+
+The source binding and conversation remain unchanged. The destination's old
+binding is replaced only when the native JSON trace identifies a distinct child,
+before completion, so a cancelled or failed invocation can still be resumed.
+No distinct child means failure, never fallback to a fresh or source session.
+Failure before a child is identified preserves the previous destination binding.
+Later calls with `--session DESTINATION` resume the child without forking again.
+Named local OpenCode calls explicitly pass the work directory as `--dir` on
+forks and subsequent turns: setting only the subprocess cwd can leave native
+resume output waiting after the model has already completed its reply.
+Native history is preserved. Concurrent named writes share the session-store lock.
+
+`src/fork/conversations.ts` resolves the source and wraps the native command;
+`SessionCheckpoint` records the child and publishes a `kind: fork` progress event
+with `source`, destination `session` and `nativeId` after saving the binding.
+Upstream hooks in `src/cli.ts` parse/validate the flag, build a new session plan,
+wrap the command, checkpoint streamed output and require a distinct child on
+success. `src/sessions.ts` wraps named-session writes in the shared store lock.
+Tests: `fork-conversations` and `fork-session-checkpoint`.
 
 ## Clean sessions
 
@@ -160,6 +215,7 @@ An id is only ever forgotten while the name's tmux session (`headless-<agent>-<n
 | --- | --- | --- |
 | `--clean-before` | closes it, forgets the id, then launches a new conversation | forgets the id, then launches a new conversation |
 | `--clean-after` | runs the task; the name stays marked | runs the task in the stored conversation; the name stays marked |
+| `--forget-session` | refuses to forget the live session | forgets the binding and pending clean-after mark, without launching an agent |
 | none, name marked | runs the task in the live session | forgets the id and clears the mark, then launches a new conversation |
 
 `--clean-after` does not watch the session. It records a mark in the fork's own
@@ -170,17 +226,60 @@ detaching and exiting later, a crash, a reboot. A one-shot run has always ended 
 Both flags need `--session` and are rejected with `--docker`, whose session store lives inside the
 container home. `--print-command` changes nothing, so it prints the command without the cleaning.
 
+`headless AGENT --session NAME --forget-session` is an explicit, idempotent local
+cleanup operation. It requires no prompt, native CLI or provider credentials,
+does not invoke a model, and refuses launch options such as `--prompt`,
+`--tmux`, `--docker` and `--modal`. Call it after a one-shot process has been
+reaped; it refuses a still-running named tmux session. Like other cleaning it
+preserves native conversation history and the entry's profile/work-dir metadata.
+`--print-command` previews the operation without changing the store.
+
 `src/fork/clean.ts` edits `sessions.json` directly instead of adding a writer to upstream's
 `src/sessions.ts`, and writes it the same way (temporary file, then rename).
 
 Upstream edits, all in `src/cli.ts`:
 
-- `ParsedArgs.forkCleanBefore` and `forkCleanAfter`, and their cases in `parseArgs`.
-- Two help lines.
+- `ParsedArgs.forkCleanBefore`, `forkCleanAfter` and `forkForgetSession`, and their cases in `parseArgs`.
+- The cleaning help lines and an early control-plane branch for `--forget-session`.
 - A `validateForkClean` call after `validateSessionAlias`.
 - An `applyForkClean` call before the tmux session check, so the store is cleaned before anything reads it.
 
 Test: `fork-clean`.
+
+## Antigravity JSON
+
+One-shot Antigravity calls use `agy --output-format stream-json` (agy 1.4.12).
+This also supplies the output format required by its native `--json-schema` flag.
+Headless extracts the final successful result's `structured_output` when present,
+otherwise its `response`, and gives that answer alone to ordinary callers such as pt.
+Raw `--json` preserves native envelopes; SDK output carries the extracted answer,
+native conversation id and normalized tool/final-message events.
+
+Native `step_update` tool starts supply live progress directly. Completed tool
+records do not repeat their starts. Local `--progress` and `--progress-file`
+normalize both `read_file`/`Path` and `view_file`/`AbsolutePath` to `Read(path)`.
+Current `write_file`/`edit_file` records use `Path` and normalize to `Write`/`Edit`,
+alongside older `write_to_file` and replacement-tool records. Writes and edits
+retain the complete affected path with the editing marker.
+Local progress streams
+supplement thinking text from that exact native conversation's transcript:
+stream-json reports thinking-token usage but omits the thought text itself.
+The follower is pinned by the streamed conversation id, starts past existing
+history on resume, and forwards only thinking—not transcript tool calls or replies.
+Docker/Modal and raw SDK streams receive no local transcript supplement. Thoughts
+are delivered as normalized events so split native JSON records remain intact.
+Intermediate `text_delta` values are not completed answers. Missing final results,
+unsuccessful statuses and `finished_reason` (timeout, interruption or error) fail
+the invocation even when the process exits zero. The native conversation id can
+checkpoint a named session before the turn finishes. Interactive tmux calls retain
+their native TUI and transcript-based behavior.
+
+Implementation: `src/fork/antigravity-json.ts` and `antigravity-thoughts.ts`. Upstream hooks: the output-format
+option in `src/agents.ts`, result/error/identity extraction in `src/output.ts`,
+event normalization in `src/trace-events.ts`, and stream capture, completion checking
+and transcript-follower selection in `src/cli.ts`, plus direct event observation
+in `src/trace-events.ts` and `src/fork/progress-file.ts`.
+Tests: `fork-antigravity-json` and `fork-antigravity-thoughts`.
 
 ## Structured output
 
@@ -254,9 +353,9 @@ before and after and `💭` in front, its later lines indented under the first:
   line and drawn again under it, so it never stays in the output, and a silent agent is told from a
   hung one by whether its lines keep coming. Off a terminal it is not drawn.
 
-- **A resumed Antigravity conversation.** Antigravity's progress comes from its transcript, which a
-  run resuming a `--session` goes on writing rather than starting. That transcript is followed from
-  its size at launch, so the run's own steps show and the conversation's history does not.
+- **Antigravity.** One-shot tools and the final reply come from native stream-json.
+  Local progress supplements only thought text from the exact conversation's transcript,
+  skipping existing history on resume, as described in [Antigravity JSON](#antigravity-json).
 
 A harness shows only the thinking its event stream carries. Codex carries none unless asked, so with
 `--progress` it is given `-c model_reasoning_summary="detailed"`, before the trailing `-`. A run
@@ -296,6 +395,16 @@ without `--progress`. The caller gives one file per run, so it knows the run fro
   which a path holding a comma makes ambiguous. It is in `data.events` too, the one change outside
   the file, and `--progress` lists the files from it.
 - **Codex's thinking** is asked for as with `--progress`.
+- **Running OpenCode tools.** For local one-shot runs, `src/fork/opencode-progress.ts`
+  supplements stdout with running assistant tool parts from OpenCode's SQLite database,
+  polled every 500 ms through read-only `sqlite3` queries. The native session id comes
+  from this invocation's stdout; parts created before launch and other sessions or
+  roles are excluded. Terminal and file progress report each identified call once,
+  retaining a later failure without repeating the call. Fast calls still come from
+  stdout. Only tool names and inputs are queried, not accumulated tool output.
+  Raw stdout and SDK traces retain their native events. Docker and Modal use their
+  native completion events; no local database is consulted for them. A failed
+  database query reports one warning and leaves stdout progress working.
 - **Not with `--tmux` or `--attach`**, which capture no trace; with `--json`, `--debug` or
   `--sdk-format` it works as without them.
 
@@ -310,6 +419,9 @@ Upstream edits:
   Antigravity transcript follower started for it as for `--progress`; and `withForkProgressArgs`
   given either flag.
 - `src/trace-events.ts`: `paths` on the `tool` event and where each harness's edits set it; the
-  renderer's edit case reading it; `TranscriptFollower` taking any `feed`/`flush` sink.
+  renderer's edit case reading it; `TranscriptFollower` taking any `feed`/`flush` sink;
+  `ProgressRenderer` delegates OpenCode call deduplication to the fork helper.
+- `src/cli.ts`: the local `OpenCodeToolProgress` follower started beside progress,
+  fed the native stdout for session identification, and stopped with execution.
 
-Tests: `fork-progress-file`, and the `paths` cases in `trace-events`.
+Tests: `fork-progress-file`, `fork-opencode-progress`, and the `paths` cases in `trace-events`.

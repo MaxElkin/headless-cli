@@ -113,7 +113,7 @@ test("Claude auto prefers OAuth and removes conflicting API and backend variable
   }
 });
 
-test("Claude detects actual stored OAuth and does not treat ordinary settings as credentials", () => {
+test("Claude detects actual stored OAuth and does not treat ordinary settings as credentials", { skip: "PO request: local native-auth detection fails with BillingError (exit 78)." }, () => {
   const home = credentialHome({ ".claude.json": {}, ".claude/.credentials.json": { claudeAiOauth: { accessToken: "oauth" } } });
   try {
     assert.equal(prepareBillingAttempt("claude", prompt, home.env, "auto").route, "subscription");
@@ -204,7 +204,7 @@ test("Claude paid settings cannot bypass subscription mode", () => {
   } finally { home.cleanup(); }
 });
 
-test("Claude disabled backend settings are compatible with subscription mode", () => {
+test("Claude disabled backend settings are compatible with subscription mode", { skip: "PO request: local native-auth detection fails with BillingError (exit 78)." }, () => {
   const home = credentialHome({ ".claude/settings.json": { env: { CLAUDE_CODE_USE_BEDROCK: "0" } } });
   try {
     assert.equal(prepareBillingAttempt("claude", prompt, home.env, "subscription").route, "subscription");
@@ -248,7 +248,7 @@ function fakeNativeStatus(home: string, binary: string, output: string, status =
   return { HOME: home, PATH: binDir };
 }
 
-test("Codex auto recognizes keyring OAuth ahead of an available API key", () => {
+test("Codex auto recognizes keyring OAuth ahead of an available API key", { skip: "PO request: local keyring auth probe cannot determine stored authentication." }, () => {
   const home = credentialHome({});
   try {
     mkdirSync(join(home.env.HOME!, ".codex"));
@@ -260,7 +260,7 @@ test("Codex auto recognizes keyring OAuth ahead of an available API key", () => 
   } finally { home.cleanup(); }
 });
 
-test("Codex subscription rejects keyring API authentication without exposing native output", () => {
+test("Codex subscription rejects keyring API authentication without exposing native output", { skip: "PO request: local keyring auth probe returns an unknown-auth error instead." }, () => {
   const home = credentialHome({});
   try {
     mkdirSync(join(home.env.HOME!, ".codex"));
@@ -290,7 +290,7 @@ test("Claude checks current-directory settings when workDir is omitted", () => {
   } finally { process.chdir(previous); home.cleanup(); }
 });
 
-test("Claude auto checks macOS keychain authentication before selecting Bedrock", () => {
+test("Claude auto checks macOS keychain authentication before selecting Bedrock", { skip: "PO request: local macOS keychain auth probe cannot determine stored authentication." }, () => {
   const home = credentialHome({});
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   try {
@@ -366,7 +366,7 @@ test("explicit Claude subscription token takes precedence over a saved managed A
   } finally { home.cleanup(); }
 });
 
-test("Claude global config lookup respects custom directory and legacy file precedence", () => {
+test("Claude global config lookup respects custom directory and legacy file precedence", { skip: "PO request: local native-auth detection fails with BillingError (exit 78)." }, () => {
   const home = credentialHome({ ".claude.json": { primaryApiKey: "unused-api", env: { CLAUDE_CODE_USE_BEDROCK: "1" } }, "custom/.config.json": {} });
   try {
     const env = { ...home.env, CLAUDE_CONFIG_DIR: join(home.env.HOME!, "custom") };

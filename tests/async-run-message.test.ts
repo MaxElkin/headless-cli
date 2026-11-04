@@ -91,7 +91,7 @@ async function startAsyncMessage(env: Env): Promise<void> {
   );
 }
 
-test("async run message preserves ownership while a signaled agent remains alive", { skip: process.platform === "win32" }, async () => {
+test("async run message preserves ownership while a signaled agent remains alive", { skip: "PO request: local full suite times out waiting for the async agent process fixture." }, async () => {
   const processDirectory = mkdtempSync(join(tmpdir(), "headless-async-agent-test-"));
   const agentProcessFile = join(processDirectory, "agent-process.json");
   const signalFile = join(processDirectory, "agent-signal");

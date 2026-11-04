@@ -6,7 +6,7 @@ import type { ForkAllowMode } from "./fork/allow.js";
 
 export type AllowMode = "read-only" | "yolo" | ForkAllowMode;
 
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type Env = Record<string, string | undefined>;
 
